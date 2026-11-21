@@ -327,10 +327,31 @@ func (op *delElemOp) exec(fm *Frame) Exception {
 // fn f { foobar } is a shorthand for set '&'f = { foobar }.
 func compileFn(cp *compiler, fn *parse.Form) effectOp {
 	args := getArgs(cp, fn)
-	name := args.get(0, "name").stringLiteral()
+	nameNode := args.get(0, "name")
+	name := nameNode.stringLiteral()
 	bodyNode := args.get(1, "function body").lambda()
 	if !args.finish() {
 		return nil
+	}
+
+	if nameNode.node != nil {
+		if p, ok := cmpd.Primary(nameNode.node); ok && !parse.ValidLHSVariable(p, false) {
+			cp.errorpf(p, "function name must be a valid variable name")
+			return nopOp{}
+		}
+		if name == "" {
+			cp.errorpfPartial(nameNode.node, "function name must not be empty")
+			return nopOp{}
+		}
+		sigil, _ := SplitSigil(name)
+		if sigil != "" {
+			cp.errorpf(nameNode.node, "function name must not have a sigil")
+			return nopOp{}
+		}
+		if _, rest := SplitQName(name); rest != "" {
+			cp.errorpf(nameNode.node, "function name must be unqualified")
+			return nopOp{}
+		}
 	}
 
 	// Define the variable before compiling the body, so that the body may refer
