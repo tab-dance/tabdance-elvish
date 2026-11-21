@@ -833,6 +833,26 @@ Compilation error: variable $i not found
 Exception: x
   [tty]:1:14-19: fn f {|&opt=(fail x)| }
 
+## function name starting with @ is invalid (tab-dance/tabdance-elvish#18) ##
+~> fn @test {|| }
+Compilation error: function name must be a valid variable name
+  [tty]:1:4-8: fn @test {|| }
+
+## quoted function name starting with @ is invalid ##
+~> fn '@test' {|| }
+Compilation error: function name must not have a sigil
+  [tty]:1:4-10: fn '@test' {|| }
+
+## empty function name is invalid ##
+~> fn '' {|| }
+Compilation error: function name must not be empty
+  [tty]:1:4-5: fn '' {|| }
+
+## qualified function name is invalid ##
+~> fn 'a:b' {|| }
+Compilation error: function name must be unqualified
+  [tty]:1:4-8: fn 'a:b' {|| }
+
 ///////
 # use #
 ///////
