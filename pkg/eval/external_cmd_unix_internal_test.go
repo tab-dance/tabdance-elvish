@@ -4,6 +4,8 @@ package eval
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"syscall"
 	"testing"
@@ -69,7 +71,11 @@ func TestExec_Argv0Argv(t *testing.T) {
 				gotArgv = argv
 				return nil
 			}
-			defer func() { syscallExec = syscall.Exec }()
+			execApplyRedirs = func([]*Port) error { return nil }
+			defer func() {
+				syscallExec = syscall.Exec
+				execApplyRedirs = defaultApplyExecRedirs
+			}()
 
 			ev := NewEvaler()
 			err := ev.Eval(parse.Source{Name: "[test]", Code: test.code}, EvalCfg{})
@@ -109,5 +115,74 @@ func testDecSHLVL(t *testing.T, oldValue, newValue string) {
 	decSHLVL()
 	if gotValue := os.Getenv(env.SHLVL); gotValue != newValue {
 		t.Errorf("got new value %q, want %q", gotValue, newValue)
+	}
+}
+
+func TestExec_AppliesRedirections(t *testing.T) {
+	if os.Getenv("ELVISH_EXEC_REDIR_HELPER") == "1" {
+		out := os.Getenv("ELVISH_EXEC_REDIR_OUT")
+		code := "exec /bin/sh -c \"echo hi\" > " + parse.Quote(out)
+		ev := NewEvaler()
+		_ = ev.Eval(parse.Source{Name: "[test]", Code: code}, EvalCfg{})
+		return
+	}
+
+	dir := testutil.InTempDir(t)
+	outFile := filepath.Join(dir, "out.txt")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestExec_AppliesRedirections$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		"ELVISH_EXEC_REDIR_HELPER=1",
+		"ELVISH_EXEC_REDIR_OUT="+outFile,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("reading redirected output: %v\nhelper output:\n%s", err, output)
+	}
+	if got := string(data); got != "hi\n" {
+		t.Fatalf("redirected output = %q, want %q\nhelper output:\n%s", got, "hi\n", output)
+	}
+}
+
+func TestExec_AppliesFdCloseRedirection(t *testing.T) {
+	if os.Getenv("ELVISH_EXEC_FD_CLOSE_HELPER") == "1" {
+		out := os.Getenv("ELVISH_EXEC_FD_CLOSE_OUT")
+		code := "exec /bin/sh -c 'if echo hi >&2; then exit 1; else echo ok; fi' > " +
+			parse.Quote(out) + " 2>&-"
+		ev := NewEvaler()
+		_ = ev.Eval(parse.Source{Name: "[test]", Code: code}, EvalCfg{})
+		return
+	}
+
+	dir := testutil.InTempDir(t)
+	outFile := filepath.Join(dir, "out.txt")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestExec_AppliesFdCloseRedirection$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		"ELVISH_EXEC_FD_CLOSE_HELPER=1",
+		"ELVISH_EXEC_FD_CLOSE_OUT="+outFile,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("reading redirected output: %v\nhelper output:\n%s", err, output)
+	}
+	if got := string(data); got != "ok\n" {
+		t.Fatalf("redirected output = %q, want %q\nhelper output:\n%s", got, "ok\n", output)
 	}
 }
