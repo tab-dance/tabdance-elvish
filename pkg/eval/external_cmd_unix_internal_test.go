@@ -241,3 +241,69 @@ func TestExec_RestoresStateOnExecFailure(t *testing.T) {
 		t.Fatalf("dest should be untouched by rollback target, got %q", string(destData))
 	}
 }
+
+func TestExec_RestoresStateOnApplyFailure(t *testing.T) {
+	dir := testutil.InTempDir(t)
+	target, err := os.Create(filepath.Join(dir, "target.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	dest, err := os.Create(filepath.Join(dir, "dest.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dest.Close()
+
+	bad, err := os.Create(filepath.Join(dir, "bad.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	badFD := int(bad.Fd())
+	bad.Close()
+	badFile := os.NewFile(uintptr(badFD), "bad")
+
+	targetFD := int(target.Fd())
+	maxFD := targetFD
+	if badFD+1 > maxFD {
+		maxFD = badFD + 1
+	}
+	ports := make([]*Port, maxFD+1)
+	ports[targetFD] = &Port{File: dest}
+	ports[badFD+1] = &Port{File: badFile}
+
+	oldDup := unixDup
+	unixDup = func(fd int) (int, error) {
+		if fd == badFD {
+			return -1, syscall.EBADF
+		}
+		return oldDup(fd)
+	}
+	defer func() { unixDup = oldDup }()
+
+	restore, err := defaultApplyExecRedirs(ports)
+	if err == nil {
+		if restore != nil {
+			restore()
+		}
+		t.Fatal("expected error")
+	}
+
+	if _, err := target.WriteString("ok"); err != nil {
+		t.Fatalf("writing to original target fd: %v", err)
+	}
+	data, err := os.ReadFile(target.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "ok" {
+		t.Fatalf("original target content = %q, want %q", got, "ok")
+	}
+	destData, err := os.ReadFile(dest.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(destData) != 0 {
+		t.Fatalf("dest should be untouched after rollback, got %q", string(destData))
+	}
+}

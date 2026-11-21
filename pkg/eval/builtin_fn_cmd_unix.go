@@ -24,6 +24,13 @@ var ErrNotInSameProcessGroup = errors.New("not in the same process group")
 // Reference to syscall.Exec. Can be overridden in tests.
 var syscallExec = syscall.Exec
 
+var (
+	unixClose    = unix.Close
+	unixDup      = unix.Dup
+	unixDup2     = unix.Dup2
+	unixFcntlInt = unix.FcntlInt
+)
+
 // Reference to redirection application. Can be overridden in tests.
 var execApplyRedirs = defaultApplyExecRedirs
 
@@ -79,7 +86,7 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 	saved := make(map[int]int)
 	closeSaved := func() {
 		for _, dup := range saved {
-			_ = unix.Close(dup)
+			_ = unixClose(dup)
 		}
 	}
 
@@ -88,7 +95,7 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 		if _, ok := targets[fd]; ok {
 			return nil
 		}
-		dup, err := unix.Dup(fd)
+		flags, err := unixFcntlInt(uintptr(fd), unix.F_GETFD, 0)
 		if err != nil {
 			if errors.Is(err, unix.EBADF) {
 				targets[fd] = execFDState{fd: fd, savedFD: -1, closed: true}
@@ -96,9 +103,16 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 			}
 			return err
 		}
-		flags, err := unix.FcntlInt(uintptr(dup), unix.F_GETFD, 0)
+		dup, err := unixDup(fd)
 		if err != nil {
-			_ = unix.Close(dup)
+			if errors.Is(err, unix.EBADF) {
+				targets[fd] = execFDState{fd: fd, savedFD: -1, closed: true}
+				return nil
+			}
+			return err
+		}
+		if _, err := unixFcntlInt(uintptr(dup), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+			_ = unixClose(dup)
 			return err
 		}
 		targets[fd] = execFDState{fd: fd, savedFD: dup, flags: flags}
@@ -113,17 +127,17 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 		for i := len(fds) - 1; i >= 0; i-- {
 			state := targets[fds[i]]
 			if state.closed {
-				_ = unix.Close(state.fd)
+				_ = unixClose(state.fd)
 				continue
 			}
 			if state.savedFD >= 0 {
-				_ = unix.Dup2(state.savedFD, state.fd)
-				_, _ = unix.FcntlInt(uintptr(state.fd), unix.F_SETFD, state.flags)
+				_ = unixDup2(state.savedFD, state.fd)
+				_, _ = unixFcntlInt(uintptr(state.fd), unix.F_SETFD, state.flags)
 			}
 		}
 		for _, state := range targets {
 			if !state.closed && state.savedFD >= 0 {
-				_ = unix.Close(state.savedFD)
+				_ = unixClose(state.savedFD)
 			}
 		}
 	}
@@ -143,7 +157,7 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 		if _, ok := saved[src]; ok {
 			continue
 		}
-		dup, err := unix.Dup(src)
+		dup, err := unixDup(src)
 		if err != nil {
 			rollback()
 			return nil, err
@@ -160,7 +174,7 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 			return nil, err
 		}
 		if port.File == nil {
-			if err := unix.Close(fd); err != nil && !errors.Is(err, unix.EBADF) {
+			if err := unixClose(fd); err != nil && !errors.Is(err, unix.EBADF) {
 				rollback()
 				return nil, err
 			}
@@ -171,13 +185,13 @@ func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 			src = dup
 		}
 		if src == fd {
-			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+			if _, err := unixFcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
 				rollback()
 				return nil, err
 			}
 			continue
 		}
-		if err := unix.Dup2(src, fd); err != nil {
+		if err := unixDup2(src, fd); err != nil {
 			rollback()
 			return nil, err
 		}
