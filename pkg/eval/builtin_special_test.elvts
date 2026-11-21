@@ -680,6 +680,19 @@ Compilation error: need variable or body
 # while #
 /////////
 
+## defer in while loop ##
+~> var x = (num 0)
+   while (< $x 3) {
+     defer { put deferred }
+     put $x
+     set x = (+ $x 1)
+   }
+▶ (num 0)
+▶ deferred
+▶ (num 1)
+▶ deferred
+▶ (num 2)
+▶ deferred
 ~> var x = (num 0)
    while (< $x 4) { put $x; set x = (+ $x 1) }
 ▶ (num 0)
@@ -725,6 +738,14 @@ Exception: x
 # for #
 ///////
 
+## defer in for loop ##
+~> for v [a b c] { defer { put deferred }; put $v }
+▶ a
+▶ deferred
+▶ b
+▶ deferred
+▶ c
+▶ deferred
 ~> for x [tempora mores] { put 'O '$x }
 ▶ 'O tempora'
 ▶ 'O mores'
