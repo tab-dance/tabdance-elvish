@@ -62,7 +62,7 @@ func ConvertListIndex(rawIndex any, n int) (*ListIndex, error) {
 		}
 		return &ListIndex{false, index, 0}, nil
 	case string:
-		slice, i, j, err := parseIndexString(rawIndex, n)
+		slice, i, j, sep, err := parseIndexString(rawIndex, n)
 		if err != nil {
 			return nil, err
 		}
@@ -77,7 +77,11 @@ func ConvertListIndex(rawIndex any, n int) (*ListIndex, error) {
 				return nil, err
 			}
 			j0 := j
-			j, err = adjustAndCheckIndex(j, n, true)
+			if sep == "..=" {
+				j, err = adjustAndCheckClosedUpperIndex(j, i, n)
+			} else {
+				j, err = adjustAndCheckIndex(j, n, true)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -103,42 +107,78 @@ func ConvertListIndex(rawIndex any, n int) (*ListIndex, error) {
 // Index = Number |
 //
 //	Number ( '..' | '..=' ) Number
-func parseIndexString(s string, n int) (slice bool, i int, j int, err error) {
+func parseIndexString(s string, n int) (slice bool, i int, j int, sep string, err error) {
 	low, sep, high := splitIndexString(s)
 	if sep == "" {
 		// A single number
 		i, err := atoi(s, n)
 		if err != nil {
-			return false, 0, 0, err
+			return false, 0, 0, "", err
 		}
-		return false, i, 0, nil
+		return false, i, 0, "", nil
 	}
 	if low == "" {
 		i = 0
 	} else {
 		i, err = atoi(low, n+1)
 		if err != nil {
-			return false, 0, 0, err
+			return false, 0, 0, "", err
 		}
 	}
 	if high == "" {
-		j = n
+		if sep == "..=" {
+			// -1 marks an omitted upper bound for a closed slice.
+			j = -1
+		} else {
+			j = n
+		}
+	} else if sep == "..=" {
+		j, err = atoiClosedUpper(high, n)
+		if err != nil {
+			return false, 0, 0, "", err
+		}
 	} else {
 		j, err = atoi(high, n+1)
 		if err != nil {
-			return false, 0, 0, err
-		}
-		if sep == "..=" {
-			// TODO: Handle j == MaxInt-1
-			if j == -1 { // subtle corner case that is same as no high value
-				j = n
-			} else {
-				j++
-			}
+			return false, 0, 0, "", err
 		}
 	}
 	// Two numbers
-	return true, i, j, nil
+	return true, i, j, sep, nil
+}
+
+// adjustAndCheckClosedUpperIndex validates the upper bound of a closed slice
+// (a..=b), which is inclusive, and converts it to an exclusive upper bound.
+// The lower bound i has already been normalized.
+func adjustAndCheckClosedUpperIndex(j, i, n int) (int, error) {
+	if j == -1 {
+		// -1 is the same as an omitted upper bound.
+		return n, nil
+	}
+	if i == n {
+		// The slice is already empty, so the only valid explicit upper bound
+		// is -1 (handled above).
+		return 0, errs.OutOfRange{
+			What:     "closed slice upper index",
+			ValidLow: "-1", ValidHigh: "-1",
+			Actual: strconv.Itoa(j)}
+	}
+	if j < 0 {
+		if j+n < i {
+			return 0, errs.OutOfRange{
+				What:     "closed slice upper index",
+				ValidLow: strconv.Itoa(i - n), ValidHigh: "-1",
+				Actual: strconv.Itoa(j)}
+		}
+		return j + n + 1, nil
+	}
+	if j >= n || j < i {
+		return 0, errs.OutOfRange{
+			What:     "closed slice upper index",
+			ValidLow: strconv.Itoa(i), ValidHigh: strconv.Itoa(n - 1),
+			Actual: strconv.Itoa(j)}
+	}
+	return j + 1, nil
 }
 
 func splitIndexString(s string) (low, sep, high string) {
@@ -149,6 +189,28 @@ func splitIndexString(s string) (low, sep, high string) {
 		return s[:i], "..", s[i+2:]
 	}
 	return s, "", ""
+}
+
+// atoiClosedUpper is like atoi, but reports range errors in terms of a closed
+// slice upper bound.
+func atoiClosedUpper(a string, n int) (int, error) {
+	i, err := strconv.Atoi(a)
+	if err != nil {
+		if err.(*strconv.NumError).Err == strconv.ErrRange {
+			if i < 0 {
+				return 0, errs.OutOfRange{
+					What:     "closed slice upper index",
+					ValidLow: strconv.Itoa(-n), ValidHigh: "-1",
+					Actual: a}
+			}
+			return 0, errs.OutOfRange{
+				What:     "closed slice upper index",
+				ValidLow: "0", ValidHigh: strconv.Itoa(n - 1),
+				Actual: a}
+		}
+		return 0, errIndexMustBeInteger
+	}
+	return i, nil
 }
 
 // atoi is a wrapper around strconv.Atoi, converting strconv.ErrRange to

@@ -35,6 +35,11 @@ func TestIndex(t *testing.T) {
 		Args("abc", "..=1").Rets("ab", nil),
 		Args("abc", "..=").Rets("abc", nil),
 		Args("abc", "..=-1").Rets("abc", nil),
+		// Closed string slice upper index out of range.
+		Args("abc", "0..=3").Rets(tt.Any, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "0", ValidHigh: "2", Actual: "3"}),
+		Args("abc", "0..=5").Rets(tt.Any, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "0", ValidHigh: "2", Actual: "5"}),
 		// String slices not at rune boundary.
 		Args("你好", "2..").Rets(tt.Any, errIndexNotAtRuneBoundary),
 		Args("你好", "..2").Rets(tt.Any, errIndexNotAtRuneBoundary),
@@ -94,6 +99,33 @@ func TestIndex(t *testing.T) {
 		Args(li4, "3..=").Rets(eq(MakeList("ipsum")), nil),
 		Args(li4, "..=").Rets(eq(li4), nil),
 		Args(li4, "..=-1").Rets(eq(li4), nil),
+		Args(li4, "..=-4").Rets(eq(MakeList("foo")), nil),
+
+		// Closed slice upper index out of range.
+		Args(li4, "0..=4").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "0", ValidHigh: "3", Actual: "4"}),
+		Args(li4, "0..=5").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "0", ValidHigh: "3", Actual: "5"}),
+		Args(li4, "..=-5").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "-4", ValidHigh: "-1", Actual: "-5"}),
+		Args(li4, "0..="+z).Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "0", ValidHigh: "3", Actual: z}),
+		Args(li4, "0..=-"+z).Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "-4", ValidHigh: "-1", Actual: "-" + z}),
+		Args(li4, "1..=-4").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "-3", ValidHigh: "-1", Actual: "-4"}),
+		// Closed slice upper index below the lower bound.
+		Args(li4, "2..=1").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "2", ValidHigh: "3", Actual: "1"}),
+		Args(li4, "3..=2").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "3", ValidHigh: "3", Actual: "2"}),
+		Args(li4, "3..=-2").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "-1", ValidHigh: "-1", Actual: "-2"}),
+		// No explicit upper bound is valid for an already-empty slice.
+		Args(li4, "4..=-4").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "-1", ValidHigh: "-1", Actual: "-4"}),
+		Args(li4, "4..=0").Rets(nil, errs.OutOfRange{
+			What: "closed slice upper index", ValidLow: "-1", ValidHigh: "-1", Actual: "0"}),
 
 		// Slice index out of range.
 		Args(li4, "-5..1").Rets(nil, errs.OutOfRange{
