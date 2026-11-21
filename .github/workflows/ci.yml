@@ -75,7 +75,7 @@ jobs:
     - name: Set up emulator
       run: |
         sudo apt update
-        sudo apt install binfmt-support qemu-user-static
+        sudo apt install -y binfmt-support qemu-user-binfmt
         update-binfmts --display
     - name: Checkout code
       uses: actions/checkout@v4
