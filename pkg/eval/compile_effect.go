@@ -91,8 +91,10 @@ func (op *pipelineOp) exec(fm *Frame) Exception {
 		newFm := fm.Fork()
 		inputIsPipe := i > 0
 		outputIsPipe := i < nforms-1
+		var pipeIn *Port
 		if inputIsPipe {
-			newFm.ports[0] = nextIn
+			pipeIn = nextIn
+			newFm.ports[0] = pipeIn
 		}
 		if outputIsPipe {
 			// Each internal port pair consists of a (byte) pipe pair and a
@@ -121,11 +123,15 @@ func (op *pipelineOp) exec(fm *Frame) Exception {
 			if exc != nil && !(outputIsPipe && isReaderGone(exc)) {
 				*pexc = exc
 			}
-			if inputIsPipe {
-				input := newFm.ports[0]
-				*input.sendError = errs.ReaderGone{}
-				close(input.sendStop)
-				input.readerGone.Store(true)
+			if pipeIn != nil {
+				*pipeIn.sendError = errs.ReaderGone{}
+				close(pipeIn.sendStop)
+				pipeIn.readerGone.Store(true)
+				// Redirections may have replaced stdin; close the original pipe
+				// reader to avoid leaking it.
+				if newFm.ports[0] != pipeIn && pipeIn.closeFile {
+					pipeIn.File.Close()
+				}
 			}
 			newFm.Close()
 			wg.Done()

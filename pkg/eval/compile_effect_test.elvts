@@ -350,6 +350,13 @@ abc
    only-values < bytes | count
 ▶ (num 0)
 
+## input redirection overrides pipeline input ##
+// Regression test for https://b.elv.sh/1844 (tab-dance#14).
+~> use os
+   nop | nop < $os:dev-null
+~> echo foo | slurp < $os:dev-null
+▶ ''
+
 ## writing value output to file throws an exception ##
 ~> put foo >a
 Exception: port does not support value output
