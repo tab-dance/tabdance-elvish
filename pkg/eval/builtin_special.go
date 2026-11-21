@@ -715,38 +715,119 @@ func compileFor(cp *compiler, fn *parse.Form) effectOp {
 		return nil
 	}
 
-	lvalue := cp.compileOneLValue(varNode, setLValue|newLValue)
-
 	iterOp := cp.compoundOp(iterNode)
+
+	name, scopedByShape := simpleForLoopVarName(varNode)
+	if !scopedByShape {
+		lv := cp.compileOneLValue(varNode, setLValue|newLValue)
+		bodyOp := cp.primaryOp(bodyNode)
+		var elseOp valuesOp
+		if elseNode != nil {
+			elseOp = cp.primaryOp(elseNode)
+		}
+		return &forOp{fn.Range(), lv, iterOp, bodyOp, elseOp, nil, nil}
+	}
+
+	local, capture := cp.pushScope()
+	local.add(name)
+	lv := cp.compileOneLValue(varNode, setLValue|newLValue)
+	scoped := lv.ref != nil && lv.ref.scope == localScope && len(lv.indexOps) == 0
+	if !scoped {
+		cp.popScope()
+		lv = cp.compileOneLValue(varNode, setLValue|newLValue)
+		bodyOp := cp.primaryOp(bodyNode)
+		var elseOp valuesOp
+		if elseNode != nil {
+			elseOp = cp.primaryOp(elseNode)
+		}
+		return &forOp{fn.Range(), lv, iterOp, bodyOp, elseOp, nil, nil}
+	}
+
 	bodyOp := cp.primaryOp(bodyNode)
 	var elseOp valuesOp
 	if elseNode != nil {
 		elseOp = cp.primaryOp(elseNode)
 	}
 
-	return &forOp{fn.Range(), lvalue, iterOp, bodyOp, elseOp}
+	newLocal := append([]staticVarInfo(nil), local.infos...)
+	cp.popScope()
+
+	return &forOp{fn.Range(), lv, iterOp, bodyOp, elseOp, newLocal, capture}
+}
+
+func simpleForLoopVarName(n *parse.Compound) (string, bool) {
+	if n == nil || len(n.Indexings) != 1 {
+		return "", false
+	}
+	idx := n.Indexings[0]
+	if len(idx.Indices) > 0 {
+		return "", false
+	}
+	if !parse.ValidLHSVariable(idx.Head, true) {
+		return "", false
+	}
+	sigil, qname := SplitSigil(idx.Head.Value)
+	if sigil != "" || qname == "" {
+		return "", false
+	}
+	segs := SplitQNameSegs(qname)
+	if len(segs) != 1 {
+		return "", false
+	}
+	return segs[0], true
 }
 
 type forOp struct {
 	diag.Ranging
-	lvalue lvalue
-	iterOp valuesOp
-	bodyOp valuesOp
-	elseOp valuesOp
+	lvalue   lvalue
+	iterOp   valuesOp
+	bodyOp   valuesOp
+	elseOp   valuesOp
+	newLocal []staticVarInfo
+	capture  *staticUpNs
 }
 
 func (op *forOp) exec(fm *Frame) Exception {
-	variable, err := derefLValue(fm, op.lvalue)
-	if err != nil {
-		return fm.errorp(op.lvalue, err)
+	local := fm.local
+	if op.newLocal != nil {
+		local = &Ns{
+			make([]vars.Var, len(op.newLocal)),
+			append([]staticVarInfo(nil), op.newLocal...)}
+		for i, info := range op.newLocal {
+			local.slots[i] = MakeVarFromName(info.name)
+		}
 	}
+
+	loopFm := fm.Fork()
+	loopFm.local = local
+	if op.capture != nil {
+		capture := &Ns{
+			make([]vars.Var, len(op.capture.infos)),
+			make([]staticVarInfo, len(op.capture.infos))}
+		for i, info := range op.capture.infos {
+			if info.local {
+				capture.slots[i] = fm.local.slots[info.index]
+				capture.infos[i] = fm.local.infos[info.index]
+			} else {
+				capture.slots[i] = fm.up.slots[info.index]
+				capture.infos[i] = fm.up.infos[info.index]
+			}
+		}
+		loopFm.up = capture
+	}
+
 	iterable, err := evalForValue(fm, op.iterOp, "value being iterated")
 	if err != nil {
 		return fm.errorp(op, err)
 	}
 
-	body := execLambdaOp(fm, op.bodyOp)
-	elseBody := execLambdaOp(fm, op.elseOp)
+	body := execLambdaOp(loopFm, op.bodyOp)
+	elseBody := execLambdaOp(loopFm, op.elseOp)
+
+	variable, lvalErr := derefLValue(loopFm, op.lvalue)
+	if lvalErr != nil {
+		return fm.errorp(op.lvalue, lvalErr)
+	}
 
 	iterated := false
 	var errElement error
@@ -757,7 +838,7 @@ func (op *forOp) exec(fm *Frame) Exception {
 			errElement = err
 			return false
 		}
-		err = body.Call(fm.Fork(), NoArgs, NoOpts)
+		err = body.Call(loopFm.Fork(), NoArgs, NoOpts)
 		if err != nil {
 			exc := err.(Exception)
 			if exc.Reason() == Continue {
@@ -779,7 +860,7 @@ func (op *forOp) exec(fm *Frame) Exception {
 	}
 
 	if !iterated && elseBody != nil {
-		return fm.errorp(op, elseBody.Call(fm.Fork(), NoArgs, NoOpts))
+		return fm.errorp(op, elseBody.Call(loopFm.Fork(), NoArgs, NoOpts))
 	}
 	return nil
 }
