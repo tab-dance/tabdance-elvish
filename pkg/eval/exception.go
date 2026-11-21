@@ -52,8 +52,8 @@ type StackTrace struct {
 // Reason returns the Reason field if err is an Exception. Otherwise it returns
 // err itself.
 func Reason(err error) error {
-	if exc, ok := err.(*exception); ok {
-		return exc.reason
+	if exc, ok := err.(Exception); ok {
+		return exc.Reason()
 	}
 	return err
 }
@@ -188,6 +188,9 @@ func MakePipelineError(excs []Exception) error {
 			newexcs[i] = OK
 		} else {
 			newexcs[i] = e
+			if _, ok := AsExit(e); ok {
+				return e
+			}
 			if e.Reason() != nil {
 				notOK++
 				lastNotOK = i

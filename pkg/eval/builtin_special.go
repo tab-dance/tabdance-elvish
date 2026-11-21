@@ -962,11 +962,13 @@ func (op *tryOp) exec(fm *Frame) Exception {
 
 	err := body.Call(fm.Fork(), NoArgs, NoOpts)
 	if err != nil {
-		if catch != nil {
+		if _, ok := AsExit(err); ok {
+			// Exit is not catchable; still run finally.
+		} else if catch != nil {
 			if exceptVar != nil {
-				err := exceptVar.Set(err.(Exception))
-				if err != nil {
-					return fm.errorp(op.catchVar, err)
+				setErr := exceptVar.Set(err.(Exception))
+				if setErr != nil {
+					return fm.errorp(op.catchVar, setErr)
 				}
 			}
 			err = catch.Call(fm.Fork(), NoArgs, NoOpts)

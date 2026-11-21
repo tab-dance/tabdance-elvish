@@ -248,6 +248,9 @@ func (fm *Frame) errorp(r diag.Ranger, e error) Exception {
 	case nil:
 		return nil
 	case Exception:
+		if _, ok := AsExit(e); ok {
+			return e
+		}
 		return e
 	default:
 		if _, ok := e.(errs.SetReadOnlyVar); ok {

@@ -64,6 +64,9 @@ func script(ev *eval.Evaler, fds [3]*os.File, args []string, cfg *scriptCfg) int
 	} else {
 		err := evalInTTY(fds, ev, nil, src)
 		if err != nil {
+			if code, ok := eval.AsExit(err); ok {
+				return code
+			}
 			diag.ShowError(fds[2], err)
 			return 2
 		}

@@ -3,6 +3,7 @@ package eval
 import (
 	"os"
 	"os/exec"
+	"reflect"
 
 	"src.elv.sh/pkg/eval/errs"
 )
@@ -51,7 +52,16 @@ func exit(fm *Frame, codes ...int) error {
 		return errs.ArityMismatch{What: "arguments", ValidLow: 0, ValidHigh: 1, Actual: len(codes)}
 	}
 
-	fm.Evaler.PreExit()
-	osExit(code)
-	return nil
+	// Keep compatibility with evaltest's OSExit override.
+	if !isDefaultOSExit() {
+		fm.Evaler.PreExit()
+		osExit(code)
+		return nil
+	}
+
+	return Exit{Code: code}
+}
+
+func isDefaultOSExit() bool {
+	return reflect.ValueOf(osExit).Pointer() == reflect.ValueOf(os.Exit).Pointer()
 }
