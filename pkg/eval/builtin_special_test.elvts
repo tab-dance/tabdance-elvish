@@ -181,6 +181,45 @@ Compilation error: cannot find variable $y
 ▶ v
 ▶ u
 
+## multiple element assignments to same container ##
+~> var m = [&a=1 &b=2]
+   set m[a] m[b] = 3 4
+   put $m[a] $m[b]
+▶ 3
+▶ 4
+~> var m = [&a=1 &b=2 &c=3]
+   set m[a] m[b] m[c] = 4 5 6
+   put $m[a] $m[b] $m[c]
+▶ 4
+▶ 5
+▶ 6
+~> var li = [x y z]
+   set li[1] li[2] = u v
+   put $@li
+▶ x
+▶ u
+▶ v
+~> var li = [a b c d]
+   set li[0] li[2] li[3] = w x y
+   put $@li
+▶ w
+▶ b
+▶ x
+▶ y
+~> var m = [&a=1 &b=2]
+   fn f { tmp m[a] m[b] = 3 4; put $m[a] $m[b] }
+   f
+   put $m[a] $m[b]
+▶ 3
+▶ 4
+▶ 1
+▶ 2
+~> var m = [&a=1]
+   set m m[a] = [&a=2 &b=3] 4
+   put $m[a] $m[b]
+▶ 4
+▶ 3
+
 ## setting a non-exist environment variable ##
 //unset-env X
 ~> has-env X

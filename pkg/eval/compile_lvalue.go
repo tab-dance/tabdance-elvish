@@ -146,16 +146,22 @@ func doAssign(fm *Frame, r diag.Ranger, lhs lvaluesGroup, rhs valuesOp, rc resto
 	}
 
 	// Now perform assignment.
+	var modifiedHeads []vars.Var
 	if rest := lhs.rest; rest == -1 {
 		if len(variables) != len(values) {
 			return fm.errorp(r, errs.ArityMismatch{What: "assignment right-hand-side",
 				ValidLow: len(variables), ValidHigh: len(variables), Actual: len(values)})
 		}
 		for i, variable := range variables {
+			variable, exc = refreshLValue(fm, lhs.lvalues[i], variable, modifiedHeads)
+			if exc != nil {
+				return exc
+			}
 			exc := set(fm, lhs.lvalues[i], variable, values[i], rc)
 			if exc != nil {
 				return exc
 			}
+			modifiedHeads = noteModifiedHead(modifiedHeads, variable)
 		}
 	} else {
 		if len(values) < len(variables)-1 {
@@ -163,25 +169,70 @@ func doAssign(fm *Frame, r diag.Ranger, lhs lvaluesGroup, rhs valuesOp, rc resto
 				ValidLow: len(variables) - 1, ValidHigh: -1, Actual: len(values)})
 		}
 		for i := 0; i < rest; i++ {
-			exc := set(fm, lhs.lvalues[i], variables[i], values[i], rc)
+			variable, exc := refreshLValue(fm, lhs.lvalues[i], variables[i], modifiedHeads)
 			if exc != nil {
 				return exc
 			}
+			exc = set(fm, lhs.lvalues[i], variable, values[i], rc)
+			if exc != nil {
+				return exc
+			}
+			modifiedHeads = noteModifiedHead(modifiedHeads, variable)
 		}
 		restOff := len(values) - len(variables)
-		exc := set(fm, lhs.lvalues[rest],
-			variables[rest], vals.MakeList(values[rest:rest+restOff+1]...), rc)
+		restVar, exc := refreshLValue(fm, lhs.lvalues[rest], variables[rest], modifiedHeads)
 		if exc != nil {
 			return exc
 		}
+		exc = set(fm, lhs.lvalues[rest],
+			restVar, vals.MakeList(values[rest:rest+restOff+1]...), rc)
+		if exc != nil {
+			return exc
+		}
+		modifiedHeads = noteModifiedHead(modifiedHeads, restVar)
 		for i := rest + 1; i < len(variables); i++ {
-			exc := set(fm, lhs.lvalues[i], variables[i], values[i+restOff], rc)
+			variable, exc := refreshLValue(fm, lhs.lvalues[i], variables[i], modifiedHeads)
 			if exc != nil {
 				return exc
 			}
+			exc = set(fm, lhs.lvalues[i], variable, values[i+restOff], rc)
+			if exc != nil {
+				return exc
+			}
+			modifiedHeads = noteModifiedHead(modifiedHeads, variable)
 		}
 	}
 	return nil
+}
+
+func refreshLValue(fm *Frame, lv lvalue, variable vars.Var, modifiedHeads []vars.Var) (vars.Var, Exception) {
+	head := vars.HeadOfElement(variable)
+	if head == nil {
+		return variable, nil
+	}
+	for _, modified := range modifiedHeads {
+		if modified == head {
+			refreshed, err := vars.RefreshElement(variable)
+			if err != nil {
+				return nil, fm.errorp(lv, err)
+			}
+			return refreshed, nil
+		}
+	}
+	return variable, nil
+}
+
+func noteModifiedHead(modifiedHeads []vars.Var, variable vars.Var) []vars.Var {
+	head := vars.HeadOfElement(variable)
+	if head == nil {
+		head = variable
+	}
+	for _, modified := range modifiedHeads {
+		if modified == head {
+			return modifiedHeads
+		}
+	}
+	return append(modifiedHeads, head)
 }
 
 type restoreCollector func(func(*Frame) Exception)
