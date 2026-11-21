@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"golang.org/x/sys/unix"
 	"src.elv.sh/pkg/env"
 	"src.elv.sh/pkg/eval/errs"
 	"src.elv.sh/pkg/eval/vals"
@@ -21,6 +22,9 @@ var ErrNotInSameProcessGroup = errors.New("not in the same process group")
 
 // Reference to syscall.Exec. Can be overridden in tests.
 var syscallExec = syscall.Exec
+
+// Reference to redirection application. Can be overridden in tests.
+var execApplyRedirs = defaultApplyExecRedirs
 
 func execFn(fm *Frame, args ...any) error {
 	var argstrings []string
@@ -39,10 +43,70 @@ func execFn(fm *Frame, args ...any) error {
 		return err
 	}
 
+	if err := execApplyRedirs(fm.ports); err != nil {
+		return err
+	}
+
 	fm.Evaler.PreExit()
 	decSHLVL()
 
 	return syscallExec(argstrings[0], argstrings, os.Environ())
+}
+
+func defaultApplyExecRedirs(ports []*Port) error {
+	saved := make(map[int]int)
+	closeSaved := func() {
+		for _, dup := range saved {
+			_ = unix.Close(dup)
+		}
+	}
+
+	for fd, port := range ports {
+		if port == nil || port.File == nil {
+			continue
+		}
+		src := int(port.File.Fd())
+		if src == fd || src < 0 || src >= len(ports) {
+			continue
+		}
+		if _, ok := saved[src]; ok {
+			continue
+		}
+		dup, err := unix.Dup(src)
+		if err != nil {
+			closeSaved()
+			return err
+		}
+		saved[src] = dup
+	}
+
+	for fd, port := range ports {
+		if port == nil {
+			continue
+		}
+		if port.File == nil {
+			_ = unix.Close(fd)
+			continue
+		}
+		src := int(port.File.Fd())
+		if dup, ok := saved[src]; ok {
+			src = dup
+		}
+		if src == fd {
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+				closeSaved()
+				return err
+			}
+			continue
+		}
+		if err := unix.Dup2(src, fd); err != nil {
+			closeSaved()
+			return err
+		}
+	}
+
+	closeSaved()
+	return nil
 }
 
 // Decrements $E:SHLVL. Called from execFn to ensure that $E:SHLVL remains the
