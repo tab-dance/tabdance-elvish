@@ -122,6 +122,18 @@ func HeadOfElement(v Var) Var {
 	return nil
 }
 
+// RefreshElement rebuilds an element variable's assocer chain from the current
+// value of its head variable. It is used when the head variable may have been
+// modified since the element variable was created, such as in multi-assignment
+// where multiple lvalues target the same container.
+func RefreshElement(v Var) (Var, error) {
+	ev, ok := v.(*elem)
+	if !ok {
+		return v, nil
+	}
+	return MakeElement(ev.variable, ev.indices)
+}
+
 // ElementErrorLevel returns the level of an error returned by MakeElement or
 // DelElement. Level 0 represents that the error is about the variable itself.
 // Returns -1 if the argument was not returned from MakeElement or DelElement.
