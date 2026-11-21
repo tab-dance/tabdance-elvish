@@ -140,8 +140,11 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 	exc := c.op.exec(fm)
 	excDefer := fm.runDefers()
 	// TODO: Combine exc and excDefer if both are not nil
-	if excDefer != nil && exc == nil {
+	if excDefer != nil && excDefer.Reason() != nil && exc == nil {
 		exc = excDefer
+	}
+	if exc != nil && exc.Reason() == nil {
+		return nil
 	}
 	return exc
 }

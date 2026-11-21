@@ -120,7 +120,7 @@ func (op *pipelineOp) exec(fm *Frame) Exception {
 		}
 		f := func(formOp effectOp, pexc *Exception) {
 			exc := formOp.exec(newFm)
-			if exc != nil && !(outputIsPipe && isReaderGone(exc)) {
+			if exc != nil && exc.Reason() != nil && !(outputIsPipe && isReaderGone(exc)) {
 				*pexc = exc
 			}
 			if pipeIn != nil {
@@ -301,6 +301,9 @@ func (op *formOp) exec(fm *Frame) (errRet Exception) {
 
 	fm.traceback = fm.addTraceback(op)
 	err = headFn.Call(fm, args, convertedOpts)
+	if err == nil {
+		return nil
+	}
 	if exc, ok := err.(Exception); ok {
 		return exc
 	}

@@ -289,7 +289,7 @@ func (fm *Frame) runDefers() Exception {
 	for i := len(defers) - 1; i >= 0; i-- {
 		exc2 := defers[i](fm)
 		// TODO: Combine exc and exc2 if both are not nil
-		if exc2 != nil && exc == nil {
+		if exc2 != nil && exc2.Reason() != nil && exc == nil {
 			exc = exc2
 		}
 	}

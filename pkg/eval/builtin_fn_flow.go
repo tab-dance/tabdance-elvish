@@ -212,6 +212,9 @@ func deferFn(fm *Frame, fn Callable) error {
 	deferTraceback := fm.traceback
 	fm.addDefer(func(fm *Frame) Exception {
 		err := fn.Call(fm, NoArgs, NoOpts)
+		if err == nil {
+			return nil
+		}
 		if exc, ok := err.(Exception); ok {
 			return exc
 		}
