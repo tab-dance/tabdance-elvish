@@ -325,6 +325,16 @@ type blackholeWriter struct{}
 func (blackholeWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 func slurp(fm *Frame) (string, error) {
+	// Discard values in a goroutine to avoid deadlock when the upstream
+	// producer writes both bytes and values.
+	valuesDone := make(chan struct{})
+	go func() {
+		for range fm.InputChan() {
+		}
+		close(valuesDone)
+	}()
+	defer func() { <-valuesDone }()
+
 	b, err := io.ReadAll(fm.InputFile())
 	return string(b), err
 }
