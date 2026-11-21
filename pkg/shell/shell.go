@@ -84,14 +84,15 @@ func (p *Program) Run(fds [3]*os.File, args []string) error {
 	ui.NoColor = os.Getenv(env.NO_COLOR) != ""
 	interactive := len(args) == 0
 	ev := p.makeEvaler(fds[2], interactive)
-	defer ev.PreExit()
-
 	if !interactive {
 		exit := script(
 			ev, fds, args, &scriptCfg{
 				Cmd: p.codeInArg, CompileOnly: p.compileOnly, JSON: *p.json})
+		ev.PreExit()
 		return prog.Exit(exit)
 	}
+
+	defer ev.PreExit()
 
 	var spawnCfg *daemondefs.SpawnConfig
 	if p.ActivateDaemon != nil {
@@ -191,6 +192,12 @@ func evalInTTY(fds [3]*os.File, ev *eval.Evaler, ed editor, src parse.Source) er
 	err := ev.Eval(src, eval.EvalCfg{
 		Ports: ports, Interrupts: ctx, PutInFg: true})
 	done()
+	if _, ok := eval.AsExit(err); ok {
+		if ed != nil {
+			ed.RunAfterCommandHooks(src, time.Since(start).Seconds(), nil)
+		}
+		return err
+	}
 	if ed != nil {
 		ed.RunAfterCommandHooks(src, time.Since(start).Seconds(), err)
 	}

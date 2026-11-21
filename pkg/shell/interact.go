@@ -86,6 +86,10 @@ func interact(ev *eval.Evaler, fds [3]*os.File, cfg *interactCfg) {
 	if cfg.RC != "" {
 		err := sourceRC(fds, ev, ed, cfg.RC)
 		if err != nil {
+			if code, ok := eval.AsExit(err); ok {
+				ev.PreExit()
+				os.Exit(code)
+			}
 			diag.ShowError(fds[2], err)
 		}
 	}
@@ -127,6 +131,10 @@ func interact(ev *eval.Evaler, fds [3]*os.File, cfg *interactCfg) {
 		err = evalInTTY(fds, ev, ed,
 			parse.Source{Name: fmt.Sprintf("[tty %v]", cmdNum), Code: line})
 		if err != nil {
+			if code, ok := eval.AsExit(err); ok {
+				ev.PreExit()
+				os.Exit(code)
+			}
 			diag.ShowError(fds[2], err)
 		}
 	}

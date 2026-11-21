@@ -14,6 +14,26 @@
 //check-pre-exit-hook-afterwards
 ~> exit
 
+## runs defers before exiting ##
+~> fn f { defer { echo deferred }; exit 7 }; f; echo after
+deferred
+Exception: exit 7
+  [tty]:1:33-39: fn f { defer { echo deferred }; exit 7 }; f; echo after
+  [tty]:1:43-43: fn f { defer { echo deferred }; exit 7 }; f; echo after
+
+## defer can override exit code ##
+~> fn f { defer { exit 9 }; exit 1 }; f
+Exception: exit 9
+  [tty]:1:16-22: fn f { defer { exit 9 }; exit 1 }; f
+  [tty]:1:36-36: fn f { defer { exit 9 }; exit 1 }; f
+
+## not caught by try, finally runs ##
+~> try { defer { echo deferred }; exit 3 } catch e { echo caught } finally { echo finally }; echo after
+deferred
+finally
+Exception: exit 3
+  [tty]:1:32-38: try { defer { echo deferred }; exit 3 } catch e { echo caught } finally { echo finally }; echo after
+
 ## wrong arity ##
 ~> exit 1 2
 Exception: arity mismatch: arguments must be 0 to 1 values, but is 2 values

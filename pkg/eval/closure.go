@@ -139,6 +139,18 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 	fm.defers = new([]func(*Frame) Exception)
 	exc := c.op.exec(fm)
 	excDefer := fm.runDefers()
+	if _, ok := AsExit(exc); ok {
+		// Run defers, but preserve the exit request unless a defer requests exit.
+		if excDefer != nil {
+			if _, ok := AsExit(excDefer); ok {
+				return excDefer
+			}
+		}
+		return exc
+	}
+	if _, ok := AsExit(excDefer); ok {
+		return excDefer
+	}
 	// TODO: Combine exc and excDefer if both are not nil
 	if excDefer != nil && excDefer.Reason() != nil && exc == nil {
 		exc = excDefer
