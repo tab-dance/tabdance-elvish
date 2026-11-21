@@ -798,6 +798,19 @@ Exception: arity mismatch: value being iterated must be 1 value, but is 2 values
 Exception: cannot iterate number
   [tty]:1:1-17: for x (num 0) { }
 
+## loop variable does not leak into outer scope (tab-dance/tabdance-elvish#16) ##
+~> for i [1 2] { nop }; put $i
+Compilation error: variable $i not found
+  [tty]:1:26-27: for i [1 2] { nop }; put $i
+
+## loop variable shadows outer variable without leaking ##
+~> var x = outer
+   for x [1 2] { put $x }
+   put $x
+▶ 1
+▶ 2
+▶ outer
+
 //////
 # fn #
 //////
