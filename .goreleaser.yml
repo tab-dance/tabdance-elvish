@@ -58,6 +58,10 @@ aurs:
       - rsteube <rsteube@users.noreply.github.com>
     private_key: "{{ .Env.AUR_KEY }}"
     git_url: "ssh://aur@aur.archlinux.org/tabdance-elvish-bin.git"
+    provides:
+      - elvish
+    conflicts:
+      - elvish
 
 changelog:
   sort: asc
