@@ -82,6 +82,14 @@ Compilation error: variable $x not found
 Exception: no such key: x
   [tty]:3:5-9: put $n[x]
 
+## deleting variables does not alter the specified namespace ##
+~> var n = (ns [&x=foo])
+   eval &ns=$n 'del x'
+   keys $n
+▶ x
+~> put $n[x]
+▶ foo
+
 ## newly created variable can be accessed in the final namespace using &on-end ##
 ~> eval &on-end={|n| put $n[x] } 'var x = foo'
 ▶ foo

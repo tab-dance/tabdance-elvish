@@ -119,6 +119,10 @@ func eval(fm *Frame, opts evalOpts, code string) error {
 			ns = CombineNs(fm.evalNs, ns)
 		}
 	} else {
+		// Evaluate in a copy so that the namespace specified by &ns is never
+		// modified by the creation or deletion of variables. The variables
+		// themselves are still shared, so mutating their values is visible.
+		ns = ns.clone()
 		// Make the namespace visible to nested eval calls, including those
 		// inside closures that don't capture it lexically.
 		fm.evalNs = ns
