@@ -28,6 +28,10 @@ type Closure struct {
 	op          effectOp
 	newLocal    []staticVarInfo
 	captured    *Ns
+	// Namespace passed to eval with &ns, captured so that it is also
+	// available to nested eval calls after the closure has escaped the eval
+	// chunk.
+	evalNs *Ns
 }
 
 var (
@@ -93,6 +97,7 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 
 	// Make upvalue namespace and capture variables.
 	fm.up = c.captured
+	fm.evalNs = c.evalNs
 
 	// Populate local scope with arguments, options, and newly created locals.
 	localSize := len(c.ArgNames) + len(c.OptNames) + len(c.newLocal)

@@ -115,6 +115,13 @@ func eval(fm *Frame, opts evalOpts, code string) error {
 	ns := opts.Ns
 	if ns == nil {
 		ns = CombineNs(fm.up, fm.local)
+		if fm.evalNs != nil {
+			ns = CombineNs(fm.evalNs, ns)
+		}
+	} else {
+		// Make the namespace visible to nested eval calls, including those
+		// inside closures that don't capture it lexically.
+		fm.evalNs = ns
 	}
 	// The stacktrace already contains the line that calls "eval", so we pass
 	// nil as the second argument.
