@@ -24,7 +24,10 @@ type Frame struct {
 	src parse.Source
 
 	local, up *Ns
-	defers    *[]func(*Frame) Exception
+	// Namespace explicitly passed to eval with &ns, inherited by nested eval
+	// calls even through closures.
+	evalNs *Ns
+	defers *[]func(*Frame) Exception
 
 	// The godoc of the context package states:
 	//
@@ -53,6 +56,12 @@ type Frame struct {
 // returns the altered local namespace, function that can be called to actuate
 // the evaluation, and a nil error.
 func (fm *Frame) PrepareEval(src parse.Source, r diag.Ranger, ns *Ns) (*Ns, func() Exception, error) {
+	return fm.prepareEval(src, r, ns, fm.evalNs)
+}
+
+// prepareEval is like PrepareEval, but the eval namespace inherited by nested
+// eval calls is chosen by the caller instead of being inherited from fm.
+func (fm *Frame) prepareEval(src parse.Source, r diag.Ranger, ns, evalNs *Ns) (*Ns, func() Exception, error) {
 	tree, err := parse.Parse(src, parse.Config{WarningWriter: fm.ErrorFile()})
 	if err != nil {
 		return nil, nil, err
@@ -66,7 +75,7 @@ func (fm *Frame) PrepareEval(src parse.Source, r diag.Ranger, ns *Ns) (*Ns, func
 		traceback = fm.addTraceback(r)
 	}
 	newFm := &Frame{
-		fm.Evaler, src, local, new(Ns), nil, fm.ctx, fm.ports, traceback, fm.background}
+		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background}
 	op, _, err := compile(fm.Evaler.Builtin().static(), local.static(), nil, tree, fm.ErrorFile())
 	if err != nil {
 		return nil, nil, err
@@ -201,7 +210,7 @@ func (fm *Frame) Fork() *Frame {
 	}
 	return &Frame{
 		fm.Evaler, fm.src,
-		fm.local, fm.up, fm.defers,
+		fm.local, fm.up, fm.evalNs, fm.defers,
 		fm.ctx, newPorts,
 		fm.traceback, fm.background,
 	}

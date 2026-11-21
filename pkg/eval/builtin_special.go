@@ -522,7 +522,9 @@ func readFileUTF8(fname string) (string, error) {
 
 // TODO: Make access to fm.Evaler.modules concurrency-safe.
 func evalModule(fm *Frame, key string, src parse.Source, r diag.Ranger) (*Ns, error) {
-	ns, exec, err := fm.PrepareEval(src, r, new(Ns))
+	// Modules are evaluated in isolation, so they don't inherit the eval
+	// namespace of the code that loads them.
+	ns, exec, err := fm.prepareEval(src, r, new(Ns), nil)
 	if err != nil {
 		return nil, err
 	}

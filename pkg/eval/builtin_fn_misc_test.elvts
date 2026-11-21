@@ -86,6 +86,37 @@ Exception: no such key: x
 ~> eval &on-end={|n| put $n[x] } 'var x = foo'
 ▶ foo
 
+## namespace specified with &ns is visible to nested eval inside try ##
+~> eval 'try { eval "put $x" } catch e { put caught }' &ns=(ns [&x=X])
+▶ X
+
+## namespace specified with &ns is visible to nested eval inside other blocks ##
+~> eval 'if $true { eval "put $x" }; for _ [a] { eval "put $x" }; fn f { eval "put $x" }; f; { eval "put $x" }' &ns=(ns [&x=X])
+▶ X
+▶ X
+▶ X
+▶ X
+
+## nested eval inherits the namespace when no &ns is given ##
+~> eval 'eval "put $x"' &ns=(ns [&x=X])
+▶ X
+
+## namespace specified with &ns is retained by closures after eval returns ##
+~> var n = (ns [&x=X])
+   var g = (eval 'fn f { eval "put $x" }; put $f~' &ns=$n)
+   $g
+▶ X
+
+## namespace is not leaked into closures defined outside eval ##
+//force-eval-source-count 100
+~> var x = foo
+   fn f { eval "put $x" }
+   f
+Exception: Compilation error: variable $x not found
+  [eval 100]:1:5-6: put $x
+  [tty]:2:8-21: fn f { eval "put $x" }
+  [tty]:3:1-1: f
+
 ## parse error ##
 //force-eval-source-count 100
 ~> eval '['
