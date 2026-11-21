@@ -3,6 +3,7 @@
 package eval
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,7 +72,7 @@ func TestExec_Argv0Argv(t *testing.T) {
 				gotArgv = argv
 				return nil
 			}
-			execApplyRedirs = func([]*Port) error { return nil }
+			execApplyRedirs = func([]*Port) (func(), error) { return nil, nil }
 			defer func() {
 				syscallExec = syscall.Exec
 				execApplyRedirs = defaultApplyExecRedirs
@@ -184,5 +185,59 @@ func TestExec_AppliesFdCloseRedirection(t *testing.T) {
 	}
 	if got := string(data); got != "ok\n" {
 		t.Fatalf("redirected output = %q, want %q\nhelper output:\n%s", got, "ok\n", output)
+	}
+}
+
+func TestExec_RestoresStateOnExecFailure(t *testing.T) {
+	dir := testutil.InTempDir(t)
+	target, err := os.Create(filepath.Join(dir, "target.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	dest, err := os.Create(filepath.Join(dir, "dest.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dest.Close()
+
+	targetFD := int(target.Fd())
+	ports := make([]*Port, targetFD+1)
+	ports[targetFD] = &Port{File: dest}
+
+	testutil.Setenv(t, env.SHLVL, "2")
+
+	oldExec := syscallExec
+	syscallExec = func(argv0 string, argv []string, envv []string) error {
+		return errors.New("exec failed")
+	}
+	defer func() { syscallExec = oldExec }()
+
+	fm := &Frame{Evaler: NewEvaler(), ports: ports}
+	err = execFn(fm, "/bin/sh", "-c", "true")
+	if err == nil || err.Error() != "exec failed" {
+		t.Fatalf("execFn error = %v, want exec failed", err)
+	}
+
+	if got := os.Getenv(env.SHLVL); got != "2" {
+		t.Fatalf("SHLVL = %q, want %q", got, "2")
+	}
+
+	if _, err := target.WriteString("ok"); err != nil {
+		t.Fatalf("writing to original target fd: %v", err)
+	}
+	data, err := os.ReadFile(target.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "ok" {
+		t.Fatalf("original target content = %q, want %q", got, "ok")
+	}
+	destData, err := os.ReadFile(dest.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(destData) != 0 {
+		t.Fatalf("dest should be untouched by rollback target, got %q", string(destData))
 	}
 }

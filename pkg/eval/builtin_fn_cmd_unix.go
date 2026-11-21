@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"syscall"
 
@@ -43,22 +44,92 @@ func execFn(fm *Frame, args ...any) error {
 		return err
 	}
 
-	if err := execApplyRedirs(fm.ports); err != nil {
+	restoreRedirs, err := execApplyRedirs(fm.ports)
+	if err != nil {
 		return err
 	}
 
+	// PreExit hooks are one-shot by contract. A successful exec never returns,
+	// so hooks must run before syscall.Exec. If exec fails, hooks may have
+	// already run; fd and SHLVL state are rolled back below.
 	fm.Evaler.PreExit()
+	oldSHLVL, hadSHLVL := os.LookupEnv(env.SHLVL)
 	decSHLVL()
 
-	return syscallExec(argstrings[0], argstrings, os.Environ())
+	err = syscallExec(argstrings[0], argstrings, os.Environ())
+	if restoreRedirs != nil {
+		restoreRedirs()
+	}
+	if hadSHLVL {
+		_ = os.Setenv(env.SHLVL, oldSHLVL)
+	} else {
+		_ = os.Unsetenv(env.SHLVL)
+	}
+	return err
 }
 
-func defaultApplyExecRedirs(ports []*Port) error {
+type execFDState struct {
+	fd      int
+	savedFD int
+	flags   int
+	closed  bool
+}
+
+func defaultApplyExecRedirs(ports []*Port) (func(), error) {
 	saved := make(map[int]int)
 	closeSaved := func() {
 		for _, dup := range saved {
 			_ = unix.Close(dup)
 		}
+	}
+
+	targets := make(map[int]execFDState)
+	saveTarget := func(fd int) error {
+		if _, ok := targets[fd]; ok {
+			return nil
+		}
+		dup, err := unix.Dup(fd)
+		if err != nil {
+			if errors.Is(err, unix.EBADF) {
+				targets[fd] = execFDState{fd: fd, savedFD: -1, closed: true}
+				return nil
+			}
+			return err
+		}
+		flags, err := unix.FcntlInt(uintptr(dup), unix.F_GETFD, 0)
+		if err != nil {
+			_ = unix.Close(dup)
+			return err
+		}
+		targets[fd] = execFDState{fd: fd, savedFD: dup, flags: flags}
+		return nil
+	}
+	restoreTargets := func() {
+		fds := make([]int, 0, len(targets))
+		for fd := range targets {
+			fds = append(fds, fd)
+		}
+		sort.Ints(fds)
+		for i := len(fds) - 1; i >= 0; i-- {
+			state := targets[fds[i]]
+			if state.closed {
+				_ = unix.Close(state.fd)
+				continue
+			}
+			if state.savedFD >= 0 {
+				_ = unix.Dup2(state.savedFD, state.fd)
+				_, _ = unix.FcntlInt(uintptr(state.fd), unix.F_SETFD, state.flags)
+			}
+		}
+		for _, state := range targets {
+			if !state.closed && state.savedFD >= 0 {
+				_ = unix.Close(state.savedFD)
+			}
+		}
+	}
+	rollback := func() {
+		restoreTargets()
+		closeSaved()
 	}
 
 	for fd, port := range ports {
@@ -74,8 +145,8 @@ func defaultApplyExecRedirs(ports []*Port) error {
 		}
 		dup, err := unix.Dup(src)
 		if err != nil {
-			closeSaved()
-			return err
+			rollback()
+			return nil, err
 		}
 		saved[src] = dup
 	}
@@ -84,8 +155,15 @@ func defaultApplyExecRedirs(ports []*Port) error {
 		if port == nil {
 			continue
 		}
+		if err := saveTarget(fd); err != nil {
+			rollback()
+			return nil, err
+		}
 		if port.File == nil {
-			_ = unix.Close(fd)
+			if err := unix.Close(fd); err != nil && !errors.Is(err, unix.EBADF) {
+				rollback()
+				return nil, err
+			}
 			continue
 		}
 		src := int(port.File.Fd())
@@ -94,19 +172,19 @@ func defaultApplyExecRedirs(ports []*Port) error {
 		}
 		if src == fd {
 			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
-				closeSaved()
-				return err
+				rollback()
+				return nil, err
 			}
 			continue
 		}
 		if err := unix.Dup2(src, fd); err != nil {
-			closeSaved()
-			return err
+			rollback()
+			return nil, err
 		}
 	}
 
 	closeSaved()
-	return nil
+	return restoreTargets, nil
 }
 
 // Decrements $E:SHLVL. Called from execFn to ensure that $E:SHLVL remains the
