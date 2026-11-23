@@ -6,6 +6,12 @@
 # The behavior of `run-parallel` is consistent with the behavior of pipelines,
 # except that it does not perform any redirections.
 #
+# **Note**: The callables share variables with each other and with the code
+# that calls `run-parallel`. Reading and writing a variable is atomic, but
+# compound operations such as `set $m[$key] = $value` are not, so concurrent
+# updates to the same variable may be lost. See [concurrent
+# mutation](language.html#concurrent-mutation) for details.
+#
 # Here is an example that lets you pipe the stdout and stderr of a command to two
 # different commands in order to independently capture the output of each byte stream:
 #
@@ -80,6 +86,12 @@ fn each {|f inputs?| }
 # parallel, and must be either an exact positive or `+inf`. A value of `+inf`
 # (the default) means no restriction. Note that `peach &num-workers=1` is
 # equivalent to `each`.
+#
+# **Note**: The invocations of `$f` share variables with each other and with
+# the code that calls `peach`. Reading and writing a variable is atomic, but
+# compound operations such as `set $m[$key] = $value` are not, so concurrent
+# updates to the same variable may be lost. See [concurrent
+# mutation](language.html#concurrent-mutation) for details.
 #
 # Example (your output will differ):
 #

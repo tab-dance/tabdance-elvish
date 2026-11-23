@@ -1812,6 +1812,28 @@ mutation applied, and assigns it to the variable. Example:
 ▶ [foo bar]
 ```
 
+### Concurrent mutation {#concurrent-mutation}
+
+Variables can be shared between concurrent parts of a program, such as the
+invocations of a function made by [`peach`](builtin.html#peach) or
+[`run-parallel`](builtin.html#run-parallel). Reading or writing a variable is
+atomic, but a compound operation such as `set m[$key] = $value` or `del m[$key]`
+is not: concurrent updates to the same variable may be lost, because each update
+reads the variable, creates a new value, and writes it back.
+
+To avoid lost updates, collect the results of the concurrent work and mutate the
+variable afterwards, in a single place:
+
+```elvish-transcript
+~> var m = [&]
+~> range 3 | peach {|i| put [(to-string $i) $i] } |
+     each {|kv| set m[$kv[0]] = $kv[1] }
+~> keys $m | order
+▶ 0
+▶ 1
+▶ 2
+```
+
 ## Assign temporarily: `tmp` {#tmp}
 
 The `tmp` command has the same syntax as [`set`](#set), and also requires all
