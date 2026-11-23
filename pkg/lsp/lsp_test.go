@@ -245,7 +245,7 @@ func TestReferences(t *testing.T) {
 
 func TestDocumentSymbol(t *testing.T) {
 	f := setup(t)
-	text := "fn foo { }\nvar bar = 1\n"
+	text := "fn foo { }\nvar bar = 1\nset bar = 2\nfor x [a] { }\n"
 	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
 	var got []lsp.DocumentSymbol
 	err := f.conn.Call(bgCtx, "textDocument/documentSymbol", lsp.DocumentSymbolParams{
@@ -254,14 +254,71 @@ func TestDocumentSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("got error %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d symbols, want 2: %+v", len(got), got)
+	wantNames := []string{"foo", "bar", "bar", "x"}
+	if len(got) != len(wantNames) {
+		t.Fatalf("got %d symbols, want %d: %+v", len(got), len(wantNames), got)
 	}
-	if got[0].Name != "foo" || got[0].Kind != lsp.SKFunction {
-		t.Errorf("got first symbol %+v", got[0])
+	for i, name := range wantNames {
+		if got[i].Name != name {
+			t.Errorf("got[%d].Name = %q, want %q", i, got[i].Name, name)
+		}
 	}
-	if got[1].Name != "bar" || got[1].Kind != lsp.SKVariable {
-		t.Errorf("got second symbol %+v", got[1])
+}
+
+func TestReferencesExcludeDeclaration(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: false},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	want := []lsp.Location{
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestVariableDefinitionAndReferences(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\necho $foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantDef := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 7}}}
+	if diff := cmp.Diff(wantDef, def); diff != "" {
+		t.Errorf("definition (-want +got):\n%s", diff)
+	}
+	var refs []lsp.Location
+	err = f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &refs)
+	if err != nil {
+		t.Fatalf("references: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("got %d refs, want 2: %+v", len(refs), refs)
 	}
 }
 
