@@ -342,16 +342,20 @@ func (s *server) workspaceSymbol(_ context.Context, params lsp.WorkspaceSymbolPa
 		if !ok {
 			continue
 		}
-		for _, sym := range collectDocumentSymbols(doc.code, doc.parseTree.Root) {
-			if query != "" && !strings.Contains(strings.ToLower(sym.Name), query) {
-				continue
+		var walk func([]lsp.DocumentSymbol)
+		walk = func(syms []lsp.DocumentSymbol) {
+			for _, sym := range syms {
+				if query == "" || strings.Contains(strings.ToLower(sym.Name), query) {
+					out = append(out, lsp.SymbolInformation{
+						Name:     sym.Name,
+						Kind:     sym.Kind,
+						Location: lsp.Location{URI: uri, Range: *sym.Range},
+					})
+				}
+				walk(sym.Children)
 			}
-			out = append(out, lsp.SymbolInformation{
-				Name:     sym.Name,
-				Kind:     sym.Kind,
-				Location: lsp.Location{URI: uri, Range: *sym.Range},
-			})
 		}
+		walk(collectDocumentSymbols(doc.code, doc.parseTree.Root))
 	}
 	return out, nil
 }
