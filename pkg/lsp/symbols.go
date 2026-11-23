@@ -153,7 +153,7 @@ func resolveDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary,
 	switch sym.kind {
 	case symbolFunction, symbolCommand:
 		var fnFound *parse.Primary
-		var fnVarFound *parse.Primary
+		var fnVarCandidates []*parse.Primary
 		walkParse(root, func(n parse.Node) bool {
 			primary, ok := n.(*parse.Primary)
 			if !ok {
@@ -165,15 +165,29 @@ func resolveDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary,
 				}
 			}
 			if isFunctionVarDefinition(primary, sym.name) {
-				fnVarFound = primary
+				fnVarCandidates = append(fnVarCandidates, primary)
 			}
 			return true
 		})
 		if fnFound != nil {
 			return fnFound, true
 		}
-		if fnVarFound != nil {
-			return resolveVarDefinition(root, symbolRef{kind: symbolVariable, name: sym.name, scope: enclosingLambda(fnVarFound)})
+		if len(fnVarCandidates) > 0 {
+			if pos < 0 {
+				return fnVarCandidates[0], true
+			}
+			scope := scopeAt(root, pos)
+			for s := scope; ; s = enclosingLambda(s) {
+				for _, c := range fnVarCandidates {
+					if enclosingLambda(c) == s {
+						return c, true
+					}
+				}
+				if s == nil {
+					break
+				}
+			}
+			return fnVarCandidates[0], true
 		}
 		return nil, false
 	case symbolVariable:
@@ -181,6 +195,15 @@ func resolveDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary,
 	default:
 		return nil, false
 	}
+}
+
+func scopeAt(root parse.Node, pos int) *parse.Primary {
+	p := np.Find(root, pos)
+	var primary *parse.Primary
+	if p.Match(np.Store(&primary)) {
+		return enclosingLambda(primary)
+	}
+	return nil
 }
 
 func resolveVarDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
