@@ -69,13 +69,14 @@ func (s *server) shutdownHandler(_ context.Context, _ json.RawMessage) (any, err
 	return nil, nil
 }
 
-func (s *server) exitHandler(_ context.Context, _ json.RawMessage) (any, error) {
+func (s *server) exitHandler(ctx context.Context, _ json.RawMessage) (any, error) {
 	s.mu.Lock()
 	shutdown := s.shutdown
 	s.mu.Unlock()
 	if !shutdown {
 		return nil, &jsonrpc2.Error{Code: 1, Message: "exit before shutdown"}
 	}
+	go conn(ctx).Close()
 	return nil, nil
 }
 

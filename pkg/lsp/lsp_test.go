@@ -353,6 +353,15 @@ func TestShutdownRejectsRequests(t *testing.T) {
 	if err == nil || err.Error() != errInvalidRequest.Error() {
 		t.Errorf("got %v, want %v", err, errInvalidRequest)
 	}
+	err = f.conn.Notify(bgCtx, "exit", struct{}{})
+	if err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	select {
+	case <-f.conn.DisconnectNotify():
+	case <-time.After(testutil.Scaled(time.Second)):
+		t.Fatalf("timed out waiting for disconnect after exit")
+	}
 }
 
 var jsonrpcErrorTests = []struct {
