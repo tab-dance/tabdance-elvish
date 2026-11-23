@@ -104,7 +104,7 @@ var hoverTests = []struct {
 		text: "echo foo",
 		pos:  lsp.Position{Line: 0, Character: 0},
 
-		wantHover: hoverWith(must.OK1(doc.Source("echo"))),
+		wantHover: hoverWith(must.OK1(doc.Source("echo")), lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 4}}),
 	},
 	{
 		name: "variable doc",
@@ -112,7 +112,7 @@ var hoverTests = []struct {
 		text: "echo $paths",
 		pos:  lsp.Position{Line: 0, Character: 5},
 
-		wantHover: hoverWith(must.OK1(doc.Source("$paths"))),
+		wantHover: hoverWith(must.OK1(doc.Source("$paths")), lsp.Range{Start: lsp.Position{Line: 0, Character: 5}, End: lsp.Position{Line: 0, Character: 11}}),
 	},
 	{
 		name: "unknown command",
@@ -131,8 +131,12 @@ var hoverTests = []struct {
 	},
 }
 
-func hoverWith(markdown string) lsp.Hover {
-	return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}
+func hoverWith(markdown string, r ...lsp.Range) lsp.Hover {
+	h := lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}
+	if len(r) > 0 {
+		h.Range = &r[0]
+	}
+	return h
 }
 
 func TestHover(t *testing.T) {
@@ -391,6 +395,25 @@ func TestRename(t *testing.T) {
 		if e.NewText != "bar" {
 			t.Errorf("got edit %+v", e)
 		}
+	}
+}
+
+func TestDocumentHighlight(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\necho $foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.DocumentHighlight
+	err := f.conn.Call(bgCtx, "textDocument/documentHighlight", lsp.DocumentHighlightParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+	}, &got)
+	if err != nil {
+		t.Fatalf("documentHighlight: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d highlights: %+v", len(got), got)
 	}
 }
 

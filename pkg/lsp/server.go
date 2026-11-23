@@ -104,21 +104,22 @@ func routingHandler(s *server, methods map[string]method) jsonrpc2.Handler {
 
 func handler(s *server) jsonrpc2.Handler {
 	return routingHandler(s, map[string]method{
-		"initialize":                  s.initialize,
-		"initialized":                 noop,
-		"shutdown":                    s.shutdownHandler,
-		"exit":                        s.exitHandler,
-		"textDocument/didOpen":        convertMethod(s.didOpen),
-		"textDocument/didChange":      convertMethod(s.didChange),
-		"textDocument/didClose":       convertMethod(s.didClose),
-		"textDocument/hover":          convertMethod(s.hover),
-		"textDocument/completion":     convertMethod(s.completion),
-		"textDocument/definition":     convertMethod(s.definition),
-		"textDocument/references":     convertMethod(s.references),
-		"textDocument/documentSymbol": convertMethod(s.documentSymbol),
-		"workspace/symbol":            convertMethod(s.workspaceSymbol),
-		"textDocument/prepareRename":  convertMethod(s.prepareRename),
-		"textDocument/rename":         convertMethod(s.rename),
+		"initialize":                     s.initialize,
+		"initialized":                    noop,
+		"shutdown":                       s.shutdownHandler,
+		"exit":                           s.exitHandler,
+		"textDocument/didOpen":           convertMethod(s.didOpen),
+		"textDocument/didChange":         convertMethod(s.didChange),
+		"textDocument/didClose":          convertMethod(s.didClose),
+		"textDocument/hover":             convertMethod(s.hover),
+		"textDocument/completion":        convertMethod(s.completion),
+		"textDocument/definition":        convertMethod(s.definition),
+		"textDocument/references":        convertMethod(s.references),
+		"textDocument/documentSymbol":    convertMethod(s.documentSymbol),
+		"workspace/symbol":               convertMethod(s.workspaceSymbol),
+		"textDocument/prepareRename":     convertMethod(s.prepareRename),
+		"textDocument/rename":            convertMethod(s.rename),
+		"textDocument/documentHighlight": convertMethod(s.documentHighlight),
 
 		// Called by clients even when server doesn't advertise support:
 		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
@@ -139,13 +140,14 @@ func (s *server) initialize(_ context.Context, _ json.RawMessage) (any, error) {
 				OpenClose: true,
 				Change:    lsp.TDSyncKindFull,
 			},
-			CompletionProvider:      &lsp.CompletionOptions{},
-			HoverProvider:           &lsp.HoverOptions{},
-			DefinitionProvider:      &lsp.DefinitionRegistrationOptions{},
-			ReferencesProvider:      &lsp.ReferenceRegistrationOptions{},
-			DocumentSymbolProvider:  &lsp.DocumentSymbolRegistrationOptions{},
-			WorkspaceSymbolProvider: &lsp.WorkspaceSymbolRegistrationOptions{},
-			RenameProvider:          &lsp.RenameRegistrationOptions{RenameOptions: lsp.RenameOptions{PrepareProvider: true}},
+			CompletionProvider:        &lsp.CompletionOptions{},
+			HoverProvider:             &lsp.HoverOptions{},
+			DefinitionProvider:        &lsp.DefinitionRegistrationOptions{},
+			ReferencesProvider:        &lsp.ReferenceRegistrationOptions{},
+			DocumentSymbolProvider:    &lsp.DocumentSymbolRegistrationOptions{},
+			WorkspaceSymbolProvider:   &lsp.WorkspaceSymbolRegistrationOptions{},
+			RenameProvider:            &lsp.RenameRegistrationOptions{RenameOptions: lsp.RenameOptions{PrepareProvider: true}},
+			DocumentHighlightProvider: &lsp.DocumentHighlightRegistrationOptions{},
 		},
 		ServerInfo: lsp.ServerInfo{Name: "elvish"},
 	}, nil
@@ -193,7 +195,8 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 		// TODO: Take shadowing into consideration.
 		markdown, err := doc.Source("$" + primary.Value)
 		if err == nil {
-			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}, nil
+			r := lspRangeFromRange(document.code, primary)
+			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
 		}
 	}
 	// Try command doc
@@ -203,7 +206,8 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 		// TODO: Take shadowing into consideration.
 		markdown, err := doc.Source(expr.Value)
 		if err == nil {
-			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}, nil
+			r := lspRangeFromRange(document.code, expr.Compound)
+			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
 		}
 	}
 	return nil, nil
@@ -386,6 +390,27 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 	return lsp.WorkspaceEdit{
 		Changes: map[lsp.DocumentURI][]lsp.TextEdit{uri: edits},
 	}, nil
+}
+
+func (s *server) documentHighlight(_ context.Context, params lsp.DocumentHighlightParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok {
+		return []lsp.DocumentHighlight{}, nil
+	}
+	ranges := findReferences(document.parseTree.Root, sym, true)
+	highlights := make([]lsp.DocumentHighlight, len(ranges))
+	for i, r := range ranges {
+		highlights[i] = lsp.DocumentHighlight{Range: lspRangeFromRange(document.code, r)}
+	}
+	return highlights, nil
 }
 
 func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, version int, code string) {
