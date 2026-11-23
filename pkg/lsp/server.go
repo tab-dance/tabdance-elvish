@@ -164,6 +164,9 @@ func (s *server) didOpen(ctx context.Context, params lsp.DidOpenTextDocumentPara
 }
 
 func (s *server) didChange(ctx context.Context, params lsp.DidChangeTextDocumentParams) (any, error) {
+	if len(params.ContentChanges) == 0 {
+		return nil, nil
+	}
 	// ContentChanges includes full text since the server is only advertised to
 	// support that; see the initialize method.
 	uri, content := params.TextDocument.URI, params.ContentChanges[0].Text
@@ -363,6 +366,11 @@ func (s *server) prepareRename(_ context.Context, params lsp.PrepareRenameParams
 	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
 		return nil, nil
 	}
+	if sym.kind == symbolCommand {
+		if _, ok := findDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
+			sym.kind = symbolFunction
+		}
+	}
 	rg, ok := symbolRangeAt(document.parseTree.Root, pos, sym)
 	if !ok {
 		return nil, nil
@@ -382,6 +390,11 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 	sym, ok := symbolAt(document.parseTree.Root, pos)
 	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
 		return nil, nil
+	}
+	if sym.kind == symbolCommand {
+		if _, ok := findDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
+			sym.kind = symbolFunction
+		}
 	}
 	newName := normalizeRenameName(sym, params.NewName)
 	refs := findReferencePrimaries(document.parseTree.Root, sym, true)
@@ -653,8 +666,11 @@ func symbolRangeAt(root parse.Node, pos int, sym symbolRef) (diag.Ranging, bool)
 			return primary.Range(), true
 		}
 	case symbolFunction, symbolCommand:
-		if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
-			return primary.Range(), true
+		if primary.Type == parse.Variable {
+			name := normalizeVarName(primary.Value)
+			if base, ok := functionVarBase(name); ok && base == sym.name {
+				return primary.Range(), true
+			}
 		}
 		if isFnDefinition(primary, sym.name) || (isStringPrimary(primary) && primary.Value == sym.name) {
 			return primary.Range(), true
@@ -726,12 +742,17 @@ func lambdaParamOwner(primary *parse.Primary) (*parse.Primary, bool) {
 	if !ok {
 		return nil, false
 	}
-	lambda, ok := parse.Parent(compound).(*parse.Primary)
-	if !ok || lambda.Type != parse.Lambda {
+	parent := parse.Parent(compound)
+	if lambda, ok := parent.(*parse.Primary); ok && lambda.Type == parse.Lambda {
+		for _, e := range lambda.Elements {
+			if e == compound {
+				return lambda, true
+			}
+		}
 		return nil, false
 	}
-	for _, e := range lambda.Elements {
-		if e == compound {
+	if mp, ok := parent.(*parse.MapPair); ok && mp.Key == compound {
+		if lambda, ok := parse.Parent(mp).(*parse.Primary); ok && lambda.Type == parse.Lambda {
 			return lambda, true
 		}
 	}
@@ -765,6 +786,9 @@ func isVarDefinition(primary *parse.Primary, name string) bool {
 		if !ok || base != normName {
 			return false
 		}
+	}
+	if _, ok := lambdaParamOwner(primary); ok {
+		return true
 	}
 	compound, ok := parentCompound(primary)
 	if !ok {

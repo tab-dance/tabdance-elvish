@@ -502,6 +502,78 @@ func TestRenameVariableWithDollarNewName(t *testing.T) {
 	}
 }
 
+func TestRenameFunctionVariableFromUse(t *testing.T) {
+	f := setup(t)
+	text := "var foo~ = { }\nput $foo~\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var prep lsp.Range
+	err := f.conn.Call(bgCtx, "textDocument/prepareRename", lsp.PrepareRenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 5},
+		},
+	}, &prep)
+	if err != nil {
+		t.Fatalf("prepareRename: %v", err)
+	}
+	if prep.Start.Line != 1 || prep.Start.Character != 4 {
+		t.Fatalf("got prep %+v", prep)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 5},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+}
+
+func TestRenameLambdaOptionParameter(t *testing.T) {
+	f := setup(t)
+	text := "fn f {|&opt=x| echo $opt }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 21},
+		},
+		NewName: "flag",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+}
+
+func TestDidChangeEmptyContentChanges(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
+	f.conn.Notify(bgCtx, "textDocument/didChange", lsp.DidChangeTextDocumentParams{
+		TextDocument: lsp.VersionedTextDocumentIdentifier{TextDocumentIdentifier: lsp.TextDocumentIdentifier{URI: testURI}, Version: 2},
+	})
+	// Server should remain responsive.
+	var got lsp.Hover
+	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 0, Character: 0},
+	}, &got)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+}
+
 func TestDocumentHighlight(t *testing.T) {
 	f := setup(t)
 	text := "var foo = 1\necho $foo\n"
