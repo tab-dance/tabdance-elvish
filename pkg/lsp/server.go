@@ -116,6 +116,7 @@ func handler(s *server) jsonrpc2.Handler {
 		"textDocument/definition":     convertMethod(s.definition),
 		"textDocument/references":     convertMethod(s.references),
 		"textDocument/documentSymbol": convertMethod(s.documentSymbol),
+		"workspace/symbol":            convertMethod(s.workspaceSymbol),
 
 		// Called by clients even when server doesn't advertise support:
 		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
@@ -136,11 +137,12 @@ func (s *server) initialize(_ context.Context, _ json.RawMessage) (any, error) {
 				OpenClose: true,
 				Change:    lsp.TDSyncKindFull,
 			},
-			CompletionProvider:     &lsp.CompletionOptions{},
-			HoverProvider:          &lsp.HoverOptions{},
-			DefinitionProvider:     &lsp.DefinitionRegistrationOptions{},
-			ReferencesProvider:     &lsp.ReferenceRegistrationOptions{},
-			DocumentSymbolProvider: &lsp.DocumentSymbolRegistrationOptions{},
+			CompletionProvider:      &lsp.CompletionOptions{},
+			HoverProvider:           &lsp.HoverOptions{},
+			DefinitionProvider:      &lsp.DefinitionRegistrationOptions{},
+			ReferencesProvider:      &lsp.ReferenceRegistrationOptions{},
+			DocumentSymbolProvider:  &lsp.DocumentSymbolRegistrationOptions{},
+			WorkspaceSymbolProvider: &lsp.WorkspaceSymbolRegistrationOptions{},
 		},
 		ServerInfo: lsp.ServerInfo{Name: "elvish"},
 	}, nil
@@ -305,6 +307,36 @@ func (s *server) documentSymbol(_ context.Context, params lsp.DocumentSymbolPara
 		return nil, unknownDocument(uri)
 	}
 	return collectDocumentSymbols(document.code, document.parseTree.Root), nil
+}
+
+func (s *server) workspaceSymbol(_ context.Context, params lsp.WorkspaceSymbolParams) (any, error) {
+	s.mu.Lock()
+	docs := make([]lsp.DocumentURI, 0, len(s.documents))
+	for uri := range s.documents {
+		docs = append(docs, uri)
+	}
+	s.mu.Unlock()
+	query := strings.ToLower(params.Query)
+	var out []lsp.SymbolInformation
+	for _, uri := range docs {
+		s.mu.Lock()
+		doc, ok := s.documents[uri]
+		s.mu.Unlock()
+		if !ok {
+			continue
+		}
+		for _, sym := range collectDocumentSymbols(doc.code, doc.parseTree.Root) {
+			if query != "" && !strings.Contains(strings.ToLower(sym.Name), query) {
+				continue
+			}
+			out = append(out, lsp.SymbolInformation{
+				Name:     sym.Name,
+				Kind:     sym.Kind,
+				Location: lsp.Location{URI: uri, Range: *sym.Range},
+			})
+		}
+	}
+	return out, nil
 }
 
 func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, version int, code string) {

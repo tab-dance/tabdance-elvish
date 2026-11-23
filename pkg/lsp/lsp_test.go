@@ -339,6 +339,22 @@ func TestDidCloseRemovesDocument(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSymbol(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("fn foo { }\nvar bar = 1\n"))
+	var got []lsp.SymbolInformation
+	err := f.conn.Call(bgCtx, "workspace/symbol", lsp.WorkspaceSymbolParams{Query: "ba"}, &got)
+	if err != nil {
+		t.Fatalf("workspace/symbol: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "bar" {
+		t.Fatalf("got %+v", got)
+	}
+	if got[0].Location.URI != testURI {
+		t.Errorf("got URI %q", got[0].Location.URI)
+	}
+}
+
 func TestShutdownRejectsRequests(t *testing.T) {
 	f := setup(t)
 	var shutdownResp any
