@@ -856,3 +856,84 @@ func (c *client) publishDiagnostics(_ context.Context, rawParams json.RawMessage
 	c.diags <- params
 	return nil, nil
 }
+
+func TestCommandOnPlainVarNotResolvable(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	if def.URI != "" {
+		t.Fatalf("got definition %+v, want no definition", def)
+	}
+	var refs []lsp.Location
+	err = f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &refs)
+	if err != nil {
+		t.Fatalf("references: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("got refs %+v, want none", refs)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err == nil {
+		t.Fatalf("got edit %+v, want error", edit)
+	}
+}
+
+func TestCommandOnFunctionVarResolvable(t *testing.T) {
+	f := setup(t)
+	text := "var foo~ = { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	want := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 8}}}
+	if diff := cmp.Diff(want, def); diff != "" {
+		t.Fatalf("definition (-want +got):\n%s", diff)
+	}
+}
+
+func TestHoverShadowedVariableUsesResolvedBinding(t *testing.T) {
+	f := setup(t)
+	text := "var paths = 1\nfn f { var paths = 2; echo $paths }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got lsp.Hover
+	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 1, Character: 28},
+	}, &got)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	if got.Contents.Value != "" {
+		t.Fatalf("got hover %+v, want empty for shadowed local", got)
+	}
+}

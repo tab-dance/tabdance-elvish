@@ -181,10 +181,6 @@ func resolveDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
 				found = primary
 				return false
 			}
-			if sym.kind == symbolCommand && isVarDefinition(primary, sym.name) {
-				found = primary
-				return false
-			}
 			return true
 		})
 		if found != nil {
@@ -263,7 +259,11 @@ func isFnDefinition(primary *parse.Primary, name string) bool {
 	if head == "fn" {
 		return primary.Value == name
 	}
-	return head == "var" || head == "set" || head == "tmp"
+	if head == "var" || head == "set" || head == "tmp" {
+		base, ok := functionVarBase(primary.Value)
+		return ok && base == name
+	}
+	return false
 }
 
 func lambdaParamOwner(primary *parse.Primary) (*parse.Primary, bool) {

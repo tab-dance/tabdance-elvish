@@ -201,10 +201,26 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 	p := np.Find(document.parseTree.Root, pos)
 	var primary *parse.Primary
 	if p.Match(np.Store(&primary)) && primary.Type == parse.Variable {
-		// TODO: Take shadowing into consideration.
-		name := "$" + primary.Value
-		if base, ok := functionVarBase(normalizeVarName(primary.Value)); ok {
-			name = base
+		sym, ok := symbolAt(document.parseTree.Root, pos)
+		if !ok {
+			return nil, nil
+		}
+		name := "$" + normalizeVarName(primary.Value)
+		if sym.kind == symbolFunction {
+			name = sym.name
+		} else if def, ok := resolveDefinition(document.parseTree.Root, sym); ok {
+			if def.Type == parse.Variable {
+				if base, ok := functionVarBase(normalizeVarName(def.Value)); ok {
+					name = base
+				} else {
+					name = "$" + normalizeVarName(def.Value)
+				}
+			} else {
+				name = "$" + normalizeVarName(def.Value)
+			}
+			if _, isParam := lambdaParamOwner(def); isParam || isVarDefinition(def, sym.name) {
+				return nil, nil
+			}
 		}
 		if markdown, err := doc.Source(name); err == nil {
 			r := lspRangeFromRange(document.code, primary)
@@ -214,7 +230,13 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 	var expr np.SimpleExprData
 	var form *parse.Form
 	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
-		// TODO: Take shadowing into consideration.
+		sym := symbolRef{kind: symbolCommand, name: expr.Value}
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: expr.Value}); ok {
+			sym.kind = symbolFunction
+		}
+		if _, ok := resolveDefinition(document.parseTree.Root, sym); ok {
+			return nil, nil
+		}
 		if markdown, err := doc.Source(expr.Value); err == nil {
 			r := lspRangeFromRange(document.code, expr.Compound)
 			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
@@ -306,6 +328,11 @@ func (s *server) references(_ context.Context, params referenceParams) (any, err
 	sym, ok := symbolAt(document.parseTree.Root, pos)
 	if !ok {
 		return []lsp.Location{}, nil
+	}
+	if sym.kind == symbolCommand {
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}); !ok {
+			return []lsp.Location{}, nil
+		}
 	}
 	ranges := findReferences(document.parseTree.Root, sym, params.Context.IncludeDeclaration)
 	locs := make([]lsp.Location, len(ranges))
