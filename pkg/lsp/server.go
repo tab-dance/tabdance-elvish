@@ -544,8 +544,9 @@ const (
 )
 
 type symbolRef struct {
-	kind symbolKind
-	name string
+	kind  symbolKind
+	name  string
+	scope *parse.Primary
 }
 
 func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
@@ -557,9 +558,12 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 			if base, ok := functionVarBase(name); ok {
 				return symbolRef{kind: symbolFunction, name: base}, true
 			}
-			return symbolRef{kind: symbolVariable, name: name}, true
+			return symbolRef{kind: symbolVariable, name: name, scope: enclosingLambda(primary)}, true
 		}
 		if isStringPrimary(primary) {
+			if _, ok := lambdaParamOwner(primary); ok {
+				return symbolRef{kind: symbolVariable, name: normalizeVarName(primary.Value), scope: enclosingLambda(primary)}, true
+			}
 			if compound, ok := parentCompound(primary); ok {
 				if form, ok := parse.Parent(compound).(*parse.Form); ok {
 					head, _ := parseStringLiteral(form.Head)
@@ -571,7 +575,7 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 						if base, ok := functionVarBase(name); ok {
 							return symbolRef{kind: symbolFunction, name: base}, true
 						}
-						return symbolRef{kind: symbolVariable, name: name}, true
+						return symbolRef{kind: symbolVariable, name: name, scope: enclosingLambda(primary)}, true
 					}
 				}
 			}
@@ -644,10 +648,13 @@ func symbolRangeAt(root parse.Node, pos int, sym symbolRef) (diag.Ranging, bool)
 		if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
 			return primary.Range(), true
 		}
-		if isVarDefinition(primary, sym.name) {
+		if isVarDefinition(primary, sym.name) || isLambdaParam(primary, sym.name) {
 			return primary.Range(), true
 		}
 	case symbolFunction, symbolCommand:
+		if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
+			return primary.Range(), true
+		}
 		if isFnDefinition(primary, sym.name) || (isStringPrimary(primary) && primary.Value == sym.name) {
 			return primary.Range(), true
 		}
@@ -713,6 +720,39 @@ func isFnDefinition(primary *parse.Primary, name string) bool {
 	return head == "var" || head == "set" || head == "tmp"
 }
 
+func lambdaParamOwner(primary *parse.Primary) (*parse.Primary, bool) {
+	compound, ok := parentCompound(primary)
+	if !ok {
+		return nil, false
+	}
+	lambda, ok := parse.Parent(compound).(*parse.Primary)
+	if !ok || lambda.Type != parse.Lambda {
+		return nil, false
+	}
+	for _, e := range lambda.Elements {
+		if e == compound {
+			return lambda, true
+		}
+	}
+	return nil, false
+}
+
+func isLambdaParam(primary *parse.Primary, name string) bool {
+	if !isStringPrimary(primary) || normalizeVarName(primary.Value) != normalizeVarName(name) {
+		return false
+	}
+	_, ok := lambdaParamOwner(primary)
+	return ok
+}
+
+func enclosingLambda(primary *parse.Primary) *parse.Primary {
+	for cur := parse.Parent(primary); cur != nil; cur = parse.Parent(cur) {
+		if p, ok := cur.(*parse.Primary); ok && p.Type == parse.Lambda {
+			return p
+		}
+	}
+	return nil
+}
 func isVarDefinition(primary *parse.Primary, name string) bool {
 	if !isStringPrimary(primary) {
 		return false
@@ -783,12 +823,24 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 		}
 		switch sym.kind {
 		case symbolVariable:
+			if isLambdaParam(primary, sym.name) {
+				if sym.scope == nil || sym.scope == enclosingLambda(primary) {
+					if includeDeclaration {
+						primaries = append(primaries, primary)
+					}
+					return true
+				}
+			}
 			if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
-				primaries = append(primaries, primary)
+				if sym.scope == nil || sym.scope == enclosingLambda(primary) {
+					primaries = append(primaries, primary)
+				}
 				return true
 			}
 			if includeDeclaration && isVarDefinition(primary, sym.name) {
-				primaries = append(primaries, primary)
+				if sym.scope == nil || sym.scope == enclosingLambda(primary) {
+					primaries = append(primaries, primary)
+				}
 			}
 		case symbolFunction, symbolCommand:
 			if primary.Type == parse.Variable {
