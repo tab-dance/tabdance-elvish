@@ -420,7 +420,7 @@ func TestDocumentHighlight(t *testing.T) {
 func TestShutdownRejectsRequests(t *testing.T) {
 	f := setup(t)
 	var shutdownResp any
-	err := f.conn.Call(bgCtx, "shutdown", struct{}{}, &shutdownResp)
+	err := f.conn.Call(bgCtx, "shutdown", nil, &shutdownResp)
 	if err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestShutdownRejectsRequests(t *testing.T) {
 	if err == nil || err.Error() != errInvalidRequest.Error() {
 		t.Errorf("got %v, want %v", err, errInvalidRequest)
 	}
-	err = f.conn.Notify(bgCtx, "exit", struct{}{})
+	err = f.conn.Notify(bgCtx, "exit", nil)
 	if err != nil {
 		t.Fatalf("exit: %v", err)
 	}

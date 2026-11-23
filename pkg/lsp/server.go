@@ -98,7 +98,11 @@ func routingHandler(s *server, methods map[string]method) jsonrpc2.Handler {
 		if !ok {
 			return nil, errMethodNotFound
 		}
-		return fn(context.WithValue(ctx, connKey{}, conn), *req.Params)
+		var params json.RawMessage
+		if req.Params != nil {
+			params = *req.Params
+		}
+		return fn(context.WithValue(ctx, connKey{}, conn), params)
 	})
 }
 
