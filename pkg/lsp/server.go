@@ -680,14 +680,22 @@ func symbolRangeAt(root parse.Node, pos int, sym symbolRef) (diag.Ranging, bool)
 }
 
 func findDefinition(root parse.Node, sym symbolRef) (diag.Ranging, bool) {
-	var found *parse.Primary
-	walkParse(root, func(n parse.Node) bool {
-		primary, ok := n.(*parse.Primary)
-		if !ok {
-			return true
-		}
-		switch sym.kind {
-		case symbolFunction, symbolCommand:
+	def, ok := resolveDefinition(root, sym)
+	if !ok {
+		return diag.Ranging{}, false
+	}
+	return def.Range(), true
+}
+
+func resolveDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
+	switch sym.kind {
+	case symbolFunction, symbolCommand:
+		var found *parse.Primary
+		walkParse(root, func(n parse.Node) bool {
+			primary, ok := n.(*parse.Primary)
+			if !ok {
+				return true
+			}
 			if isFnDefinition(primary, sym.name) {
 				found = primary
 				return false
@@ -696,18 +704,58 @@ func findDefinition(root parse.Node, sym symbolRef) (diag.Ranging, bool) {
 				found = primary
 				return false
 			}
-		case symbolVariable:
-			if isVarDefinition(primary, sym.name) {
-				found = primary
-				return false
-			}
+			return true
+		})
+		if found != nil {
+			return found, true
+		}
+		return nil, false
+	case symbolVariable:
+		return resolveVarDefinition(root, sym)
+	default:
+		return nil, false
+	}
+}
+
+func resolveVarDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
+	var candidates []*parse.Primary
+	walkParse(root, func(n parse.Node) bool {
+		primary, ok := n.(*parse.Primary)
+		if !ok {
+			return true
+		}
+		if isVarDefinition(primary, sym.name) || isLambdaParam(primary, sym.name) {
+			candidates = append(candidates, primary)
 		}
 		return true
 	})
-	if found != nil {
-		return found.Range(), true
+	if len(candidates) == 0 {
+		return nil, false
 	}
-	return diag.Ranging{}, false
+	for scope := sym.scope; ; scope = enclosingLambda(scope) {
+		for _, c := range candidates {
+			if enclosingLambda(c) == scope {
+				return c, true
+			}
+		}
+		if scope == nil {
+			break
+		}
+	}
+	return candidates[0], true
+}
+
+func sameVarBinding(root parse.Node, sym symbolRef, primary *parse.Primary) bool {
+	def, ok := resolveDefinition(root, sym)
+	if !ok {
+		return sym.scope == nil || sym.scope == enclosingLambda(primary)
+	}
+	refSym := symbolRef{kind: sym.kind, name: sym.name, scope: enclosingLambda(primary)}
+	refDef, ok := resolveDefinition(root, refSym)
+	if !ok {
+		return false
+	}
+	return refDef == def
 }
 
 func isFnDefinition(primary *parse.Primary, name string) bool {
@@ -840,6 +888,7 @@ func parentCompound(primary *parse.Primary) (*parse.Compound, bool) {
 }
 
 func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration bool) []*parse.Primary {
+	sym = canonicalSymbol(root, sym)
 	var primaries []*parse.Primary
 	walkParse(root, func(n parse.Node) bool {
 		primary, ok := n.(*parse.Primary)
@@ -849,23 +898,19 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 		switch sym.kind {
 		case symbolVariable:
 			if isLambdaParam(primary, sym.name) {
-				if sym.scope == nil || sym.scope == enclosingLambda(primary) {
-					if includeDeclaration {
-						primaries = append(primaries, primary)
-					}
-					return true
-				}
-			}
-			if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
-				if sym.scope == nil || sym.scope == enclosingLambda(primary) {
+				if includeDeclaration && sameVarBinding(root, sym, primary) {
 					primaries = append(primaries, primary)
 				}
 				return true
 			}
-			if includeDeclaration && isVarDefinition(primary, sym.name) {
-				if sym.scope == nil || sym.scope == enclosingLambda(primary) {
+			if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
+				if sameVarBinding(root, sym, primary) {
 					primaries = append(primaries, primary)
 				}
+				return true
+			}
+			if includeDeclaration && isVarDefinition(primary, sym.name) && sameVarBinding(root, sym, primary) {
+				primaries = append(primaries, primary)
 			}
 		case symbolFunction, symbolCommand:
 			if primary.Type == parse.Variable {
@@ -895,6 +940,21 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 		return true
 	})
 	return primaries
+}
+
+func canonicalSymbol(root parse.Node, sym symbolRef) symbolRef {
+	if sym.kind == symbolVariable {
+		def, ok := resolveVarDefinition(root, sym)
+		if ok {
+			sym.scope = enclosingLambda(def)
+		}
+	}
+	if sym.kind == symbolCommand {
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
+			sym.kind = symbolFunction
+		}
+	}
+	return sym
 }
 
 func normalizeRenameName(sym symbolRef, newName string) string {

@@ -326,6 +326,54 @@ func TestVariableDefinitionAndReferences(t *testing.T) {
 	}
 }
 
+func TestVariableShadowing(t *testing.T) {
+	f := setup(t)
+	text := "var x = 1\nfn f { var x = 2; echo $x }\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 2, Character: 6},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantOuter := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 5}}}
+	if diff := cmp.Diff(wantOuter, def); diff != "" {
+		t.Fatalf("outer definition (-want +got):\n%s", diff)
+	}
+	err = f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 24},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("inner definition: %v", err)
+	}
+	wantInner := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 11}, End: lsp.Position{Line: 1, Character: 12}}}
+	if diff := cmp.Diff(wantInner, def); diff != "" {
+		t.Fatalf("inner definition (-want +got):\n%s", diff)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 2, Character: 6},
+		},
+		NewName: "y",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+}
+
 func TestDidCloseRemovesDocument(t *testing.T) {
 	f := setup(t)
 	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
