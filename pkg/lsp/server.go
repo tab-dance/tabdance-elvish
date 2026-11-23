@@ -553,7 +553,11 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 	var primary *parse.Primary
 	if p.Match(np.Store(&primary)) {
 		if primary.Type == parse.Variable && primary.Value != "" {
-			return symbolRef{kind: symbolVariable, name: normalizeVarName(primary.Value)}, true
+			name := normalizeVarName(primary.Value)
+			if base, ok := functionVarBase(name); ok {
+				return symbolRef{kind: symbolFunction, name: base}, true
+			}
+			return symbolRef{kind: symbolVariable, name: name}, true
 		}
 		if isStringPrimary(primary) {
 			if compound, ok := parentCompound(primary); ok {
@@ -563,7 +567,11 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 						return symbolRef{kind: symbolFunction, name: primary.Value}, true
 					}
 					if isVarDefinition(primary, normalizeVarName(primary.Value)) {
-						return symbolRef{kind: symbolVariable, name: normalizeVarName(primary.Value)}, true
+						name := normalizeVarName(primary.Value)
+						if base, ok := functionVarBase(name); ok {
+							return symbolRef{kind: symbolFunction, name: base}, true
+						}
+						return symbolRef{kind: symbolVariable, name: name}, true
 					}
 				}
 			}
@@ -579,6 +587,12 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 	return symbolRef{}, false
 }
 
+func functionVarBase(name string) (string, bool) {
+	if strings.HasSuffix(name, "~") && len(name) > 1 {
+		return strings.TrimSuffix(name, "~"), true
+	}
+	return "", false
+}
 func normalizeVarName(name string) string {
 	// Strip leading sigil like @ for rest vars.
 	for len(name) > 0 && (name[0] == '@') {
@@ -673,8 +687,13 @@ func findDefinition(root parse.Node, sym symbolRef) (diag.Ranging, bool) {
 }
 
 func isFnDefinition(primary *parse.Primary, name string) bool {
-	if !isStringPrimary(primary) || primary.Value != name {
+	if !isStringPrimary(primary) {
 		return false
+	}
+	if primary.Value != name {
+		if base, ok := functionVarBase(primary.Value); !ok || base != name {
+			return false
+		}
 	}
 	compound, ok := parentCompound(primary)
 	if !ok {
@@ -685,12 +704,26 @@ func isFnDefinition(primary *parse.Primary, name string) bool {
 		return false
 	}
 	head, ok := parseStringLiteral(form.Head)
-	return ok && head == "fn"
+	if !ok {
+		return false
+	}
+	if head == "fn" {
+		return primary.Value == name
+	}
+	return head == "var" || head == "set" || head == "tmp"
 }
 
 func isVarDefinition(primary *parse.Primary, name string) bool {
-	if !isStringPrimary(primary) || normalizeVarName(primary.Value) != normalizeVarName(name) {
+	if !isStringPrimary(primary) {
 		return false
+	}
+	normName := normalizeVarName(name)
+	normPrimary := normalizeVarName(primary.Value)
+	if normPrimary != normName {
+		base, ok := functionVarBase(normPrimary)
+		if !ok || base != normName {
+			return false
+		}
 	}
 	compound, ok := parentCompound(primary)
 	if !ok {
@@ -707,8 +740,7 @@ func isVarDefinition(primary *parse.Primary, name string) bool {
 	switch head {
 	case "var", "set", "tmp":
 		for i, a := range form.Args {
-			if a == compound && i < len(form.Args) {
-				// Args before '=' are LHS in typical forms.
+			if a == compound {
 				if assignmentLHS(form.Args, i) {
 					return true
 				}
@@ -760,18 +792,25 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 			}
 		case symbolFunction, symbolCommand:
 			if primary.Type == parse.Variable {
+				if base, ok := functionVarBase(normalizeVarName(primary.Value)); ok && base == sym.name {
+					primaries = append(primaries, primary)
+				}
 				return true
 			}
-			if isStringPrimary(primary) && primary.Value == sym.name {
-				if isFnDefinition(primary, sym.name) {
-					if includeDeclaration {
-						primaries = append(primaries, primary)
+			if isStringPrimary(primary) {
+				val := primary.Value
+				base, isFnVar := functionVarBase(val)
+				if val == sym.name || (isFnVar && base == sym.name) {
+					if isFnDefinition(primary, sym.name) {
+						if includeDeclaration {
+							primaries = append(primaries, primary)
+						}
+						return true
 					}
-					return true
-				}
-				if compound, ok := parentCompound(primary); ok {
-					if form, ok := parse.Parent(compound).(*parse.Form); ok && form.Head == compound {
-						primaries = append(primaries, primary)
+					if compound, ok := parentCompound(primary); ok {
+						if form, ok := parse.Parent(compound).(*parse.Form); ok && form.Head == compound {
+							primaries = append(primaries, primary)
+						}
 					}
 				}
 			}
@@ -788,7 +827,14 @@ func renameNewText(p *parse.Primary, newName string) string {
 		for i < len(name) && name[i] == '@' {
 			i++
 		}
-		return name[:i] + newName
+		suffix := ""
+		if strings.HasSuffix(name, "~") {
+			suffix = "~"
+		}
+		return name[:i] + newName + suffix
+	}
+	if isStringPrimary(p) && strings.HasSuffix(p.Value, "~") {
+		return newName + "~"
 	}
 	return newName
 }
