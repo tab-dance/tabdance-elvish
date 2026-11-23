@@ -13,6 +13,9 @@ aimed at external completion tools such as
 -   `runtime:context` and `eval.Evaler.Context()`: live shell state
     introspection (aliases, builtins, functions, variables).
 
+-   `pkg/lsp` language server: definition, references, document and workspace
+    symbols, rename, hover, and document highlight for Elvish code.
+
 ## Building
 
 ```sh

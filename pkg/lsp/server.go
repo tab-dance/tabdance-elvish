@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/sourcegraph/jsonrpc2"
 	lsp "pkg.nimblebun.works/go-lsp"
@@ -13,6 +15,7 @@ import (
 	"src.elv.sh/pkg/mods/doc"
 	"src.elv.sh/pkg/parse"
 	"src.elv.sh/pkg/parse/np"
+	"src.elv.sh/pkg/ui"
 )
 
 var (
@@ -20,38 +23,30 @@ var (
 		Code: jsonrpc2.CodeMethodNotFound, Message: "method not found"}
 	errInvalidParams = &jsonrpc2.Error{
 		Code: jsonrpc2.CodeInvalidParams, Message: "invalid params"}
+	errInvalidRequest = &jsonrpc2.Error{
+		Code: jsonrpc2.CodeInvalidRequest, Message: "invalid request"}
 )
 
 type server struct {
+	mu        sync.Mutex
 	evaler    *eval.Evaler
 	documents map[lsp.DocumentURI]document
+	diagSeq   map[lsp.DocumentURI]int
+	shutdown  bool
 }
 
 type document struct {
 	code      string
+	version   int
 	parseTree parse.Tree
-	parseErr  error
 }
 
 func newServer() *server {
-	return &server{eval.NewEvaler(), make(map[lsp.DocumentURI]document)}
-}
-
-func handler(s *server) jsonrpc2.Handler {
-	return routingHandler(map[string]method{
-		"initialize":              s.initialize,
-		"textDocument/didOpen":    convertMethod(s.didOpen),
-		"textDocument/didChange":  convertMethod(s.didChange),
-		"textDocument/hover":      convertMethod(s.hover),
-		"textDocument/completion": convertMethod(s.completion),
-
-		"textDocument/didClose": noop,
-		// Required by spec.
-		"initialized": noop,
-		// Called by clients even when server doesn't advertise support:
-		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
-		"workspace/didChangeWatchedFiles": noop,
-	})
+	return &server{
+		evaler:    eval.NewEvaler(),
+		documents: make(map[lsp.DocumentURI]document),
+		diagSeq:   make(map[lsp.DocumentURI]int),
+	}
 }
 
 type method func(context.Context, json.RawMessage) (any, error)
@@ -68,15 +63,72 @@ func convertMethod[T any](f func(context.Context, T) (any, error)) method {
 
 func noop(_ context.Context, _ json.RawMessage) (any, error) { return nil, nil }
 
+func (s *server) shutdownHandler(_ context.Context, _ json.RawMessage) (any, error) {
+	s.mu.Lock()
+	s.shutdown = true
+	s.mu.Unlock()
+	return nil, nil
+}
+
+func (s *server) exitHandler(ctx context.Context, _ json.RawMessage) (any, error) {
+	s.mu.Lock()
+	shutdown := s.shutdown
+	s.mu.Unlock()
+	// exit terminates the server with or without a preceding shutdown; the
+	// error only signals an abnormal (no-shutdown) exit.
+	go conn(ctx).Close()
+	if !shutdown {
+		return nil, &jsonrpc2.Error{Code: 1, Message: "exit before shutdown"}
+	}
+	return nil, nil
+}
+
 type connKey struct{}
 
-func routingHandler(methods map[string]method) jsonrpc2.Handler {
+func routingHandler(s *server, methods map[string]method) jsonrpc2.Handler {
 	return jsonrpc2.HandlerWithError(func(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
+		if req.Method != "initialize" && req.Method != "initialized" && req.Method != "shutdown" && req.Method != "exit" {
+			s.mu.Lock()
+			shutdown := s.shutdown
+			s.mu.Unlock()
+			if shutdown {
+				return nil, errInvalidRequest
+			}
+		}
 		fn, ok := methods[req.Method]
 		if !ok {
 			return nil, errMethodNotFound
 		}
-		return fn(context.WithValue(ctx, connKey{}, conn), *req.Params)
+		var params json.RawMessage
+		if req.Params != nil {
+			params = *req.Params
+		}
+		return fn(context.WithValue(ctx, connKey{}, conn), params)
+	})
+}
+
+func handler(s *server) jsonrpc2.Handler {
+	return routingHandler(s, map[string]method{
+		"initialize":                     s.initialize,
+		"initialized":                    noop,
+		"shutdown":                       s.shutdownHandler,
+		"exit":                           s.exitHandler,
+		"textDocument/didOpen":           convertMethod(s.didOpen),
+		"textDocument/didChange":         convertMethod(s.didChange),
+		"textDocument/didClose":          convertMethod(s.didClose),
+		"textDocument/hover":             convertMethod(s.hover),
+		"textDocument/completion":        convertMethod(s.completion),
+		"textDocument/definition":        convertMethod(s.definition),
+		"textDocument/references":        convertMethod(s.references),
+		"textDocument/documentSymbol":    convertMethod(s.documentSymbol),
+		"workspace/symbol":               convertMethod(s.workspaceSymbol),
+		"textDocument/prepareRename":     convertMethod(s.prepareRename),
+		"textDocument/rename":            convertMethod(s.rename),
+		"textDocument/documentHighlight": convertMethod(s.documentHighlight),
+
+		// Called by clients even when server doesn't advertise support:
+		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
+		"workspace/didChangeWatchedFiles": noop,
 	})
 }
 
@@ -93,60 +145,115 @@ func (s *server) initialize(_ context.Context, _ json.RawMessage) (any, error) {
 				OpenClose: true,
 				Change:    lsp.TDSyncKindFull,
 			},
-			CompletionProvider: &lsp.CompletionOptions{},
-			HoverProvider:      &lsp.HoverOptions{},
+			CompletionProvider:        &lsp.CompletionOptions{},
+			HoverProvider:             &lsp.HoverOptions{},
+			DefinitionProvider:        &lsp.DefinitionRegistrationOptions{},
+			ReferencesProvider:        &lsp.ReferenceRegistrationOptions{},
+			DocumentSymbolProvider:    &lsp.DocumentSymbolRegistrationOptions{},
+			WorkspaceSymbolProvider:   &lsp.WorkspaceSymbolRegistrationOptions{},
+			RenameProvider:            &lsp.RenameRegistrationOptions{RenameOptions: lsp.RenameOptions{PrepareProvider: true}},
+			DocumentHighlightProvider: &lsp.DocumentHighlightRegistrationOptions{},
 		},
+		ServerInfo: lsp.ServerInfo{Name: "elvish"},
 	}, nil
 }
 
 func (s *server) didOpen(ctx context.Context, params lsp.DidOpenTextDocumentParams) (any, error) {
 	uri, content := params.TextDocument.URI, params.TextDocument.Text
-	s.updateDocument(conn(ctx), uri, content)
+	s.updateDocument(conn(ctx), uri, params.TextDocument.Version, content)
 	return nil, nil
 }
 
 func (s *server) didChange(ctx context.Context, params lsp.DidChangeTextDocumentParams) (any, error) {
+	if len(params.ContentChanges) == 0 {
+		return nil, nil
+	}
 	// ContentChanges includes full text since the server is only advertised to
 	// support that; see the initialize method.
+	if params.ContentChanges[0].Range != nil {
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "incremental change not supported"}
+	}
 	uri, content := params.TextDocument.URI, params.ContentChanges[0].Text
-	s.updateDocument(conn(ctx), uri, content)
+	s.updateDocument(conn(ctx), uri, params.TextDocument.Version, content)
+	return nil, nil
+}
+
+func (s *server) didClose(ctx context.Context, params lsp.DidCloseTextDocumentParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	delete(s.documents, uri)
+	delete(s.diagSeq, uri)
+	s.mu.Unlock()
+	_ = conn(ctx).Notify(context.Background(), "textDocument/publishDiagnostics",
+		lsp.PublishDiagnosticsParams{URI: uri, Diagnostics: []lsp.Diagnostic{}})
 	return nil, nil
 }
 
 func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams) (any, error) {
-	document, ok := s.documents[params.TextDocument.URI]
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
-		return nil, unknownDocument(params.TextDocument.URI)
+		return nil, unknownDocument(uri)
 	}
 	pos := lspPositionToIdx(document.code, params.Position)
 
 	p := np.Find(document.parseTree.Root, pos)
-	// Try variable doc
 	var primary *parse.Primary
 	if p.Match(np.Store(&primary)) && primary.Type == parse.Variable {
-		// TODO: Take shadowing into consideration.
-		markdown, err := doc.Source("$" + primary.Value)
-		if err == nil {
-			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}, nil
+		sym, ok := symbolAt(document.parseTree.Root, pos)
+		if !ok {
+			return nil, nil
+		}
+		name := "$" + normalizeVarName(primary.Value)
+		if sym.kind == symbolFunction {
+			name = sym.name
+		} else if def, ok := resolveDefinition(document.parseTree.Root, sym, pos); ok {
+			if def.Type == parse.Variable {
+				if base, ok := functionVarBase(normalizeVarName(def.Value)); ok {
+					name = base
+				} else {
+					name = "$" + normalizeVarName(def.Value)
+				}
+			} else {
+				name = "$" + normalizeVarName(def.Value)
+			}
+			if _, isParam := lambdaParamOwner(def); isParam || isVarDefinition(def, sym.name) {
+				return nil, nil
+			}
+		}
+		if markdown, err := doc.Source(name); err == nil {
+			r := lspRangeFromRange(document.code, primary)
+			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
 		}
 	}
-	// Try command doc
 	var expr np.SimpleExprData
 	var form *parse.Form
 	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
-		// TODO: Take shadowing into consideration.
-		markdown, err := doc.Source(expr.Value)
-		if err == nil {
-			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}, nil
+		scope := enclosingLambdaNode(expr.Compound)
+		sym := symbolRef{kind: symbolCommand, name: expr.Value, scope: scope}
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: expr.Value, scope: scope}, pos); ok {
+			sym.kind = symbolFunction
+		}
+		if _, ok := resolveDefinition(document.parseTree.Root, sym, pos); ok {
+			return nil, nil
+		}
+		if markdown, err := doc.Source(expr.Value); err == nil {
+			r := lspRangeFromRange(document.code, expr.Compound)
+			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
 		}
 	}
 	return nil, nil
 }
 
 func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any, error) {
-	document, ok := s.documents[params.TextDocument.URI]
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
-		return nil, unknownDocument(params.TextDocument.URI)
+		return nil, unknownDocument(uri)
 	}
 	code := document.code
 	result, err := complete.Complete(
@@ -163,19 +270,17 @@ func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any
 
 	lspItems := make([]lsp.CompletionItem, len(result.Items))
 	lspRange := lspRangeFromRange(code, result.Replace)
-	var kind lsp.CompletionItemKind
-	switch result.Name {
-	case "command":
-		kind = lsp.CIKFunction
-	case "variable":
-		kind = lsp.CIKVariable
-	default:
-		// TODO: Support more values of kind
-	}
+	kind := completionKind(result.Name)
 	for i, item := range result.Items {
+		label := plainText(item.ToShow)
+		if label == "" {
+			label = item.ToInsert
+		}
 		lspItems[i] = lsp.CompletionItem{
-			Label: item.ToInsert,
-			Kind:  kind,
+			Label:            label,
+			Kind:             kind,
+			FilterText:       item.ToInsert,
+			InsertTextFormat: lsp.ITFPlainText,
 			TextEdit: &lsp.TextEdit{
 				Range:   lspRange,
 				NewText: item.ToInsert,
@@ -185,11 +290,185 @@ func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any
 	return lspItems, nil
 }
 
-func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, code string) {
+func (s *server) definition(_ context.Context, params lsp.DefinitionParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok {
+		return nil, nil
+	}
+	def, ok := findDefinition(document.parseTree.Root, sym, pos)
+	if !ok {
+		return nil, nil
+	}
+	return lsp.Location{
+		URI:   params.TextDocument.URI,
+		Range: lspRangeFromRange(document.code, def),
+	}, nil
+}
+
+type referenceParams struct {
+	lsp.TextDocumentPositionParams
+	Context lsp.ReferenceContext `json:"context"`
+}
+
+func (s *server) references(_ context.Context, params referenceParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok {
+		return []lsp.Location{}, nil
+	}
+	if sym.kind == symbolCommand {
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name, scope: sym.scope}, pos); !ok {
+			return []lsp.Location{}, nil
+		}
+	}
+	ranges := findReferences(document.parseTree.Root, sym, params.Context.IncludeDeclaration, pos)
+	locs := make([]lsp.Location, len(ranges))
+	for i, r := range ranges {
+		locs[i] = lsp.Location{URI: uri, Range: lspRangeFromRange(document.code, r)}
+	}
+	return locs, nil
+}
+
+func (s *server) documentSymbol(_ context.Context, params lsp.DocumentSymbolParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	return collectDocumentSymbols(document.code, document.parseTree.Root), nil
+}
+
+func (s *server) workspaceSymbol(_ context.Context, params lsp.WorkspaceSymbolParams) (any, error) {
+	s.mu.Lock()
+	docs := make([]lsp.DocumentURI, 0, len(s.documents))
+	for uri := range s.documents {
+		docs = append(docs, uri)
+	}
+	s.mu.Unlock()
+	query := strings.ToLower(params.Query)
+	var out []lsp.SymbolInformation
+	for _, uri := range docs {
+		s.mu.Lock()
+		doc, ok := s.documents[uri]
+		s.mu.Unlock()
+		if !ok {
+			continue
+		}
+		var walk func([]lsp.DocumentSymbol)
+		walk = func(syms []lsp.DocumentSymbol) {
+			for _, sym := range syms {
+				if query == "" || strings.Contains(strings.ToLower(sym.Name), query) {
+					out = append(out, lsp.SymbolInformation{
+						Name:     sym.Name,
+						Kind:     sym.Kind,
+						Location: lsp.Location{URI: uri, Range: *sym.Range},
+					})
+				}
+				walk(sym.Children)
+			}
+		}
+		walk(collectDocumentSymbols(doc.code, doc.parseTree.Root))
+	}
+	return out, nil
+}
+
+func (s *server) prepareRename(_ context.Context, params lsp.PrepareRenameParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := renameTarget(document.parseTree.Root, pos)
+	if !ok {
+		return nil, nil
+	}
+	rg, ok := symbolRangeAt(document.parseTree.Root, pos, sym)
+	if !ok {
+		return nil, nil
+	}
+	return lspRangeFromRange(document.code, rg), nil
+}
+
+func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := renameTarget(document.parseTree.Root, pos)
+	if !ok {
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "cannot rename symbol"}
+	}
+	newName := normalizeRenameName(sym, params.NewName)
+	if !isValidVariableName(newName) {
+		return nil, &jsonrpc2.Error{
+			Code: jsonrpc2.CodeInvalidParams, Message: "invalid variable name: " + params.NewName}
+	}
+	refs := findReferencePrimaries(document.parseTree.Root, sym, true, pos)
+	edits := make([]lsp.TextEdit, 0, len(refs))
+	for _, p := range refs {
+		edits = append(edits, lsp.TextEdit{
+			Range:   lspRangeFromRange(document.code, p.Range()),
+			NewText: renameNewText(p, newName),
+		})
+	}
+	return lsp.WorkspaceEdit{
+		Changes: map[lsp.DocumentURI][]lsp.TextEdit{uri: edits},
+	}, nil
+}
+
+func (s *server) documentHighlight(_ context.Context, params lsp.DocumentHighlightParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok {
+		return []lsp.DocumentHighlight{}, nil
+	}
+	ranges := findReferences(document.parseTree.Root, sym, true, pos)
+	highlights := make([]lsp.DocumentHighlight, len(ranges))
+	for i, r := range ranges {
+		highlights[i] = lsp.DocumentHighlight{Range: lspRangeFromRange(document.code, r)}
+	}
+	return highlights, nil
+}
+
+func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, version int, code string) {
 	tree, err := parse.Parse(parse.Source{Name: string(uri), Code: code}, parse.Config{})
-	s.documents[uri] = document{code, tree, err}
+	s.mu.Lock()
+	s.documents[uri] = document{code: code, version: version, parseTree: tree}
+	s.diagSeq[uri]++
+	seq := s.diagSeq[uri]
+	s.mu.Unlock()
 	go func() {
-		// Convert the parse error to lsp.Diagnostic objects and publish them.
 		entries := parse.UnpackErrors(err)
 		diags := make([]lsp.Diagnostic, len(entries))
 		for i, err := range entries {
@@ -200,8 +479,14 @@ func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, code s
 				Message:  err.Message,
 			}
 		}
-		conn.Notify(context.Background(), "textDocument/publishDiagnostics",
-			lsp.PublishDiagnosticsParams{URI: uri, Diagnostics: diags})
+		s.mu.Lock()
+		current := s.diagSeq[uri]
+		s.mu.Unlock()
+		if current != seq {
+			return
+		}
+		_ = conn.Notify(context.Background(), "textDocument/publishDiagnostics",
+			lsp.PublishDiagnosticsParams{URI: uri, Version: version, Diagnostics: diags})
 	}()
 }
 
@@ -268,4 +553,27 @@ func walkString(s string, f func(i int, p lsp.Position) bool) {
 		lastCR = r == '\r'
 	}
 	f(len(s), p)
+}
+
+func plainText(t ui.Text) string {
+	var sb strings.Builder
+	for _, seg := range t {
+		sb.WriteString(seg.Text)
+	}
+	return sb.String()
+}
+
+func completionKind(name string) lsp.CompletionItemKind {
+	switch name {
+	case "command":
+		return lsp.CIKFunction
+	case "variable":
+		return lsp.CIKVariable
+	case "index":
+		return lsp.CIKField
+	case "redir":
+		return lsp.CIKFile
+	default:
+		return lsp.CIKText
+	}
 }

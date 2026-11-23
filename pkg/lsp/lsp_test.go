@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,7 +105,7 @@ var hoverTests = []struct {
 		text: "echo foo",
 		pos:  lsp.Position{Line: 0, Character: 0},
 
-		wantHover: hoverWith(must.OK1(doc.Source("echo"))),
+		wantHover: hoverWith(must.OK1(doc.Source("echo")), lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 4}}),
 	},
 	{
 		name: "variable doc",
@@ -112,7 +113,7 @@ var hoverTests = []struct {
 		text: "echo $paths",
 		pos:  lsp.Position{Line: 0, Character: 5},
 
-		wantHover: hoverWith(must.OK1(doc.Source("$paths"))),
+		wantHover: hoverWith(must.OK1(doc.Source("$paths")), lsp.Range{Start: lsp.Position{Line: 0, Character: 5}, End: lsp.Position{Line: 0, Character: 11}}),
 	},
 	{
 		name: "unknown command",
@@ -131,8 +132,12 @@ var hoverTests = []struct {
 	},
 }
 
-func hoverWith(markdown string) lsp.Hover {
-	return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}
+func hoverWith(markdown string, r ...lsp.Range) lsp.Hover {
+	h := lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}}
+	if len(r) > 0 {
+		h.Range = &r[0]
+	}
+	return h
 }
 
 func TestHover(t *testing.T) {
@@ -196,6 +201,517 @@ func TestCompletion(t *testing.T) {
 	}
 }
 
+func TestDefinition(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	want := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 3},
+		End:   lsp.Position{Line: 0, Character: 6},
+	}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestReferences(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	want := []lsp.Location{
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}},
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestDocumentSymbol(t *testing.T) {
+	f := setup(t)
+	text := "fn foo {|a &b=c| }\nvar bar = 1\nset bar = 2\nfor x [a] { }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.DocumentSymbol
+	err := f.conn.Call(bgCtx, "textDocument/documentSymbol", lsp.DocumentSymbolParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	wantNames := []string{"foo", "bar", "bar", "x"}
+	if len(got) != len(wantNames) {
+		t.Fatalf("got %d symbols, want %d: %+v", len(got), len(wantNames), got)
+	}
+	for i, name := range wantNames {
+		if got[i].Name != name {
+			t.Errorf("got[%d].Name = %q, want %q", i, got[i].Name, name)
+		}
+	}
+	if len(got[0].Children) != 2 || got[0].Children[0].Name != "a" || got[0].Children[1].Name != "b" {
+		t.Fatalf("got fn children %+v", got[0].Children)
+	}
+}
+
+func TestReferencesExcludeDeclaration(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: false},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	want := []lsp.Location{
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestVariableDefinitionAndReferences(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\necho $foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantDef := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 7}}}
+	if diff := cmp.Diff(wantDef, def); diff != "" {
+		t.Errorf("definition (-want +got):\n%s", diff)
+	}
+	var refs []lsp.Location
+	err = f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &refs)
+	if err != nil {
+		t.Fatalf("references: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("got %d refs, want 2: %+v", len(refs), refs)
+	}
+}
+
+func TestVariableShadowing(t *testing.T) {
+	f := setup(t)
+	text := "var x = 1\nfn f { var x = 2; echo $x }\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 2, Character: 6},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantOuter := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 5}}}
+	if diff := cmp.Diff(wantOuter, def); diff != "" {
+		t.Fatalf("outer definition (-want +got):\n%s", diff)
+	}
+	err = f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 24},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("inner definition: %v", err)
+	}
+	wantInner := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 11}, End: lsp.Position{Line: 1, Character: 12}}}
+	if diff := cmp.Diff(wantInner, def); diff != "" {
+		t.Fatalf("inner definition (-want +got):\n%s", diff)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 2, Character: 6},
+		},
+		NewName: "y",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+}
+
+func TestDidCloseRemovesDocument(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
+	f.conn.Notify(bgCtx, "textDocument/didClose", lsp.DidCloseTextDocumentParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	})
+	checkDiag(t, f, lsp.PublishDiagnosticsParams{URI: testURI, Diagnostics: []lsp.Diagnostic{}})
+	var resp lsp.Hover
+	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 0, Character: 0},
+	}, &resp)
+	if err == nil || err.Error() != unknownDocument(testURI).Error() {
+		t.Errorf("got %v, want %v", err, unknownDocument(testURI))
+	}
+}
+
+func TestWorkspaceSymbol(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("fn foo {|arg| }\nvar bar = 1\n"))
+	var got []lsp.SymbolInformation
+	err := f.conn.Call(bgCtx, "workspace/symbol", lsp.WorkspaceSymbolParams{Query: "a"}, &got)
+	if err != nil {
+		t.Fatalf("workspace/symbol: %v", err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestRename(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var prep lsp.Range
+	err := f.conn.Call(bgCtx, "textDocument/prepareRename", lsp.PrepareRenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &prep)
+	if err != nil {
+		t.Fatalf("prepareRename: %v", err)
+	}
+	if prep.Start.Line != 1 || prep.Start.Character != 0 {
+		t.Fatalf("got prep %+v", prep)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for _, e := range edits {
+		if e.NewText != "bar" {
+			t.Errorf("got edit %+v", e)
+		}
+	}
+}
+
+func TestRenameFunctionVariable(t *testing.T) {
+	f := setup(t)
+	text := "var foo~ = { }\nset foo~ = { }\nput $foo~\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 4},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 3 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for i, want := range []string{"bar~", "bar~", "$bar~"} {
+		if edits[i].NewText != want {
+			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
+		}
+	}
+}
+
+func TestRenameLambdaParameter(t *testing.T) {
+	f := setup(t)
+	text := "fn external {|program| echo $program }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 16},
+		},
+		NewName: "prog",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for i, want := range []string{"prog", "$prog"} {
+		if edits[i].NewText != want {
+			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
+		}
+	}
+}
+
+func TestRenameVariableFromUse(t *testing.T) {
+	f := setup(t)
+	text := "fn external {|one two| echo $one $two }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 36},
+		},
+		NewName: "three",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for i, want := range []string{"three", "$three"} {
+		if edits[i].NewText != want {
+			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
+		}
+	}
+}
+
+func TestRenameVariableWithDollarNewName(t *testing.T) {
+	f := setup(t)
+	text := "fn external {|one two| echo $one $two }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 36},
+		},
+		NewName: "$twofew",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for i, want := range []string{"twofew", "$twofew"} {
+		if edits[i].NewText != want {
+			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
+		}
+	}
+}
+
+func TestRenameNonRenamableCommand(t *testing.T) {
+	f := setup(t)
+	text := "echo hi\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var prep any
+	err := f.conn.Call(bgCtx, "textDocument/prepareRename", lsp.PrepareRenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 0},
+		},
+	}, &prep)
+	if err != nil {
+		t.Fatalf("prepareRename: %v", err)
+	}
+	if prep != nil {
+		t.Fatalf("got prep %#v, want nil", prep)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 0},
+		},
+		NewName: "print",
+	}, &edit)
+	if err == nil || err.Error() != (&jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "cannot rename symbol"}).Error() {
+		t.Fatalf("got err %v", err)
+	}
+}
+
+func TestRenameFunctionVariableFromUse(t *testing.T) {
+	f := setup(t)
+	text := "var foo~ = { }\nput $foo~\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var prep lsp.Range
+	err := f.conn.Call(bgCtx, "textDocument/prepareRename", lsp.PrepareRenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 5},
+		},
+	}, &prep)
+	if err != nil {
+		t.Fatalf("prepareRename: %v", err)
+	}
+	if prep.Start.Line != 1 || prep.Start.Character != 4 {
+		t.Fatalf("got prep %+v", prep)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 5},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+}
+
+func TestRenameLambdaOptionParameter(t *testing.T) {
+	f := setup(t)
+	text := "fn f {|&opt=x| echo $opt }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 21},
+		},
+		NewName: "flag",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+}
+
+func TestDidChangeEmptyContentChanges(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
+	f.conn.Notify(bgCtx, "textDocument/didChange", lsp.DidChangeTextDocumentParams{
+		TextDocument: lsp.VersionedTextDocumentIdentifier{TextDocumentIdentifier: lsp.TextDocumentIdentifier{URI: testURI}, Version: 2},
+	})
+	// Server should remain responsive.
+	var got lsp.Hover
+	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 0, Character: 0},
+	}, &got)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+}
+
+func TestDidChangeRejectsIncremental(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
+	err := f.conn.Call(bgCtx, "textDocument/didChange", lsp.DidChangeTextDocumentParams{
+		TextDocument: lsp.VersionedTextDocumentIdentifier{TextDocumentIdentifier: lsp.TextDocumentIdentifier{URI: testURI}, Version: 2},
+		ContentChanges: []lsp.TextDocumentContentChangeEvent{{
+			Range: &lsp.Range{Start: lsp.Position{}, End: lsp.Position{}},
+			Text:  "x",
+		}},
+	}, &struct{}{})
+	if err == nil || err.Error() != (&jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "incremental change not supported"}).Error() {
+		t.Fatalf("got err %v", err)
+	}
+}
+
+func TestDocumentHighlight(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\necho $foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.DocumentHighlight
+	err := f.conn.Call(bgCtx, "textDocument/documentHighlight", lsp.DocumentHighlightParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+	}, &got)
+	if err != nil {
+		t.Fatalf("documentHighlight: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d highlights: %+v", len(got), got)
+	}
+}
+
+func TestShutdownRejectsRequests(t *testing.T) {
+	f := setup(t)
+	var shutdownResp any
+	err := f.conn.Call(bgCtx, "shutdown", nil, &shutdownResp)
+	if err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	err = f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 0, Character: 0},
+	}, &lsp.Hover{})
+	if err == nil || err.Error() != errInvalidRequest.Error() {
+		t.Errorf("got %v, want %v", err, errInvalidRequest)
+	}
+	err = f.conn.Notify(bgCtx, "exit", nil)
+	if err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	select {
+	case <-f.conn.DisconnectNotify():
+	case <-time.After(testutil.Scaled(time.Second)):
+		t.Fatalf("timed out waiting for disconnect after exit")
+	}
+}
+
 var jsonrpcErrorTests = []struct {
 	name    string
 	method  string
@@ -212,6 +728,20 @@ var jsonrpcErrorTests = []struct {
 		lsp.CompletionParams{
 			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
 				TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}}},
+		unknownDocument("file://unknown")},
+	{"unknown document to definition", "textDocument/definition",
+		lsp.DefinitionParams{
+			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+				TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}}},
+		unknownDocument("file://unknown")},
+	{"unknown document to references", "textDocument/references",
+		referenceParams{
+			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+				TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}}},
+		unknownDocument("file://unknown")},
+	{"unknown document to documentSymbol", "textDocument/documentSymbol",
+		lsp.DocumentSymbolParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}},
 		unknownDocument("file://unknown")},
 }
 
@@ -313,7 +843,7 @@ type client struct {
 }
 
 func (c *client) handler() jsonrpc2.Handler {
-	return routingHandler(map[string]method{
+	return routingHandler(&server{documents: map[lsp.DocumentURI]document{}, diagSeq: map[lsp.DocumentURI]int{}}, map[string]method{
 		"textDocument/publishDiagnostics": c.publishDiagnostics,
 	})
 }
@@ -326,4 +856,449 @@ func (c *client) publishDiagnostics(_ context.Context, rawParams json.RawMessage
 	}
 	c.diags <- params
 	return nil, nil
+}
+
+func TestCommandOnPlainVarNotResolvable(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	if def.URI != "" {
+		t.Fatalf("got definition %+v, want no definition", def)
+	}
+	var refs []lsp.Location
+	err = f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &refs)
+	if err != nil {
+		t.Fatalf("references: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("got refs %+v, want none", refs)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err == nil {
+		t.Fatalf("got edit %+v, want error", edit)
+	}
+}
+
+func TestCommandOnFunctionVarResolvable(t *testing.T) {
+	f := setup(t)
+	text := "var foo~ = { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	want := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 8}}}
+	if diff := cmp.Diff(want, def); diff != "" {
+		t.Fatalf("definition (-want +got):\n%s", diff)
+	}
+}
+
+func TestHoverShadowedVariableUsesResolvedBinding(t *testing.T) {
+	f := setup(t)
+	text := "var paths = 1\nfn f { var paths = 2; echo $paths }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got lsp.Hover
+	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 1, Character: 28},
+	}, &got)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	if got.Contents.Value != "" {
+		t.Fatalf("got hover %+v, want empty for shadowed local", got)
+	}
+}
+
+func TestRedefinedFunctionDefinitionUsesLatestBeforeUse(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { echo a }\nfoo\nfn foo { echo b }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &got)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	want := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestRedefinedFunctionRenameUsesVisibleBinding(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { echo a }\nfoo\nfn foo { echo b }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got := edit.Changes[testURI]
+	want := []lsp.TextEdit{
+		{Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}, NewText: "bar"},
+		{Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}, NewText: "bar"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestNamespacedVariableDefinitionAndRename(t *testing.T) {
+	f := setup(t)
+	text := "var ns:foo = 1\necho $ns:foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 7},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantDef := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 10}}}
+	if diff := cmp.Diff(wantDef, def); diff != "" {
+		t.Fatalf("definition (-want +got):\n%s", diff)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 7},
+		},
+		NewName: "ns:bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	wantEdits := []lsp.TextEdit{
+		{Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 10}}, NewText: "ns:bar"},
+		{Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 5}, End: lsp.Position{Line: 1, Character: 12}}, NewText: "$ns:bar"},
+	}
+	if diff := cmp.Diff(wantEdits, edit.Changes[testURI]); diff != "" {
+		t.Fatalf("rename (-want +got):\n%s", diff)
+	}
+}
+
+func TestSetTmpVariableReferencesAndRename(t *testing.T) {
+	f := setup(t)
+	text := "var x = 1\nset x = 2\ntmp x = 3\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var refs []lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 3, Character: 6},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &refs)
+	if err != nil {
+		t.Fatalf("references: %v", err)
+	}
+	if len(refs) != 4 {
+		t.Fatalf("got %d refs: %+v", len(refs), refs)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 3, Character: 6},
+		},
+		NewName: "y",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if len(edit.Changes[testURI]) != 4 {
+		t.Fatalf("got %d edits: %+v", len(edit.Changes[testURI]), edit.Changes[testURI])
+	}
+}
+
+func TestRedefinedFunctionReferencesUseVisibleBinding(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { echo a }\nfoo\nfn foo { echo b }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var refs []lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &refs)
+	if err != nil {
+		t.Fatalf("references: %v", err)
+	}
+	want := []lsp.Location{
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}},
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}},
+	}
+	if diff := cmp.Diff(want, refs); diff != "" {
+		t.Fatalf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestDestructuringVarDefinitionAndRename(t *testing.T) {
+	f := setup(t)
+	text := "var (a b) = [1 2]\necho $a $b\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantDef := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 5}, End: lsp.Position{Line: 0, Character: 6}}}
+	if diff := cmp.Diff(wantDef, def); diff != "" {
+		t.Fatalf("definition (-want +got):\n%s", diff)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+		NewName: "x",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	wantEdits := []lsp.TextEdit{
+		{Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 5}, End: lsp.Position{Line: 0, Character: 6}}, NewText: "x"},
+		{Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 5}, End: lsp.Position{Line: 1, Character: 7}}, NewText: "$x"},
+	}
+	if diff := cmp.Diff(wantEdits, edit.Changes[testURI]); diff != "" {
+		t.Fatalf("rename (-want +got):\n%s", diff)
+	}
+}
+
+func TestRestLambdaParamDocumentSymbolAndRename(t *testing.T) {
+	f := setup(t)
+	text := "fn f {|@rest &opt=1| echo $rest $opt }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var syms []lsp.DocumentSymbol
+	err := f.conn.Call(bgCtx, "textDocument/documentSymbol", lsp.DocumentSymbolParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	}, &syms)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	if len(syms) != 1 || len(syms[0].Children) != 2 {
+		t.Fatalf("got %+v", syms)
+	}
+	if syms[0].Children[0].Name != "rest" || syms[0].Children[1].Name != "opt" {
+		t.Fatalf("got children %+v", syms[0].Children)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 28},
+		},
+		NewName: "args",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if len(edit.Changes[testURI]) != 2 {
+		t.Fatalf("got edits %+v", edit.Changes[testURI])
+	}
+}
+
+func TestSetBeforeVarResolvesToOuterBinding(t *testing.T) {
+	f := setup(t)
+	//     0         1         2         3
+	//     0123456789012345678901234567890123456789
+	text := "var x = 1\nfn f { set x = 2; var x = 3; echo $x }\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	outer := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 5}}}
+	inner := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 22}, End: lsp.Position{Line: 1, Character: 23}}}
+	for _, test := range []struct {
+		name string
+		pos  lsp.Position
+		want lsp.Location
+	}{
+		{"set before var refers to outer", lsp.Position{Line: 1, Character: 11}, outer},
+		{"var declaration", lsp.Position{Line: 1, Character: 22}, inner},
+		{"use after var refers to var", lsp.Position{Line: 1, Character: 35}, inner},
+		{"use after lambda refers to outer", lsp.Position{Line: 2, Character: 6}, outer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got lsp.Location
+			err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+					TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+					Position:     test.pos,
+				},
+			}, &got)
+			if err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestForVariableScopedToLoopBody(t *testing.T) {
+	f := setup(t)
+	//     012345678901234567890
+	text := "var x = 1\nfor x [a] { echo $x }\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	forVar := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 4}, End: lsp.Position{Line: 1, Character: 5}}}
+	outer := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 5}}}
+	for _, test := range []struct {
+		name string
+		pos  lsp.Position
+		want lsp.Location
+	}{
+		{"use in body refers to loop var", lsp.Position{Line: 1, Character: 18}, forVar},
+		{"use after loop refers to outer var", lsp.Position{Line: 2, Character: 6}, outer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got lsp.Location
+			err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+					TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+					Position:     test.pos,
+				},
+			}, &got)
+			if err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 18},
+		},
+		NewName: "y",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if edits := edit.Changes[testURI]; len(edits) != 2 {
+		t.Fatalf("got %d edits, want only loop var and body use: %+v", len(edits), edits)
+	}
+}
+
+func TestInnerFnNotVisibleOutsideLambda(t *testing.T) {
+	f := setup(t)
+	//     0         1         2         3
+	//     0123456789012345678901234567890123456789
+	text := "fn foo { echo a }\nfn wrapper { fn foo { echo b }; foo }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	outer := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}}
+	inner := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 16}, End: lsp.Position{Line: 1, Character: 19}}}
+	for _, test := range []struct {
+		name string
+		pos  lsp.Position
+		want lsp.Location
+	}{
+		{"use inside lambda refers to inner fn", lsp.Position{Line: 1, Character: 32}, inner},
+		{"use outside lambda refers to outer fn", lsp.Position{Line: 2, Character: 0}, outer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got lsp.Location
+			err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+					TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+					Position:     test.pos,
+				},
+			}, &got)
+			if err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRenameRejectsInvalidName(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\necho $foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	for _, newName := range []string{"foo bar", "", "&&"} {
+		var edit lsp.WorkspaceEdit
+		err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+				TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+				Position:     lsp.Position{Line: 1, Character: 6},
+			},
+			NewName: newName,
+		}, &edit)
+		if err == nil || !strings.Contains(err.Error(), "invalid variable name") {
+			t.Errorf("NewName %q: got err %v, want invalid variable name error", newName, err)
+		}
+	}
+}
+
+func TestExitWithoutShutdownClosesConnection(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "exit", nil)
+	select {
+	case <-f.conn.DisconnectNotify():
+	case <-time.After(testutil.Scaled(time.Second)):
+		t.Fatalf("timed out waiting for disconnect after exit without shutdown")
+	}
 }
