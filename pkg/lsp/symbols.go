@@ -1,7 +1,9 @@
 package lsp
 
 import (
+	"slices"
 	"strings"
+	"unicode"
 
 	lsp "pkg.nimblebun.works/go-lsp"
 	"src.elv.sh/pkg/diag"
@@ -31,7 +33,7 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 		if primary.Type == parse.Variable && primary.Value != "" {
 			name := normalizeVarName(primary.Value)
 			if base, ok := functionVarBase(name); ok {
-				return symbolRef{kind: symbolFunction, name: base}, true
+				return symbolRef{kind: symbolFunction, name: base, scope: enclosingLambda(primary)}, true
 			}
 			return symbolRef{kind: symbolVariable, name: name, scope: enclosingLambda(primary)}, true
 		}
@@ -41,16 +43,16 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 			}
 			if compound, ok := parentCompound(primary); ok {
 				if form, ok := parse.Parent(compound).(*parse.Form); ok {
-					head, _ := parseStringLiteral(form.Head)
-					if head == "fn" && len(form.Args) > 0 && form.Args[0] == compound && primary.Value != "" {
-						return symbolRef{kind: symbolFunction, name: primary.Value}, true
+					if head, ok := parseStringLiteral(form.Head); ok && head == "fn" &&
+						len(form.Args) > 0 && form.Args[0] == compound && primary.Value != "" {
+						return symbolRef{kind: symbolFunction, name: primary.Value, scope: enclosingLambda(primary)}, true
 					}
 					if isVarDefinition(primary, normalizeVarName(primary.Value)) {
 						name := normalizeVarName(primary.Value)
 						if base, ok := functionVarBase(name); ok {
-							return symbolRef{kind: symbolFunction, name: base}, true
+							return symbolRef{kind: symbolFunction, name: base, scope: declarationScope(primary)}, true
 						}
-						return symbolRef{kind: symbolVariable, name: name, scope: enclosingLambda(primary)}, true
+						return symbolRef{kind: symbolVariable, name: name, scope: declarationScope(primary)}, true
 					}
 				}
 			}
@@ -60,7 +62,7 @@ func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
 	var form *parse.Form
 	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
 		if expr.Value != "" {
-			return symbolRef{kind: symbolCommand, name: expr.Value}, true
+			return symbolRef{kind: symbolCommand, name: expr.Value, scope: enclosingLambdaNode(expr.Compound)}, true
 		}
 	}
 	return symbolRef{}, false
@@ -104,7 +106,7 @@ func renameTarget(root parse.Node, pos int) (symbolRef, bool) {
 	case symbolFunction:
 		return canonicalSymbol(root, sym, pos), true
 	case symbolCommand:
-		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, pos); ok {
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name, scope: sym.scope}, pos); ok {
 			sym.kind = symbolFunction
 			return canonicalSymbol(root, sym, pos), true
 		}
@@ -152,68 +154,53 @@ func findDefinition(root parse.Node, sym symbolRef, pos int) (diag.Ranging, bool
 func resolveDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary, bool) {
 	switch sym.kind {
 	case symbolFunction, symbolCommand:
-		var fnFound *parse.Primary
-		var fnVarCandidates []*parse.Primary
+		var latest *parse.Primary
 		walkParse(root, func(n parse.Node) bool {
 			primary, ok := n.(*parse.Primary)
 			if !ok {
 				return true
 			}
-			if isFnFormDefinition(primary, sym.name) {
-				if pos < 0 || primary.Range().From <= pos {
-					fnFound = primary
-				}
+			if !isFunctionDeclaration(primary, sym.name) {
+				return true
 			}
-			if isFunctionVarDefinition(primary, sym.name) {
-				fnVarCandidates = append(fnVarCandidates, primary)
+			// A function definition is only visible from scopes that enclose it,
+			// mirroring the compiler's scope chain.
+			if !inScopeChain(sym.scope, declarationScope(primary)) {
+				return true
+			}
+			if from := primary.Range().From; from <= pos && (latest == nil || from > latest.Range().From) {
+				latest = primary
 			}
 			return true
 		})
-		if fnFound != nil {
-			return fnFound, true
-		}
-		if len(fnVarCandidates) > 0 {
-			if pos < 0 {
-				return fnVarCandidates[0], true
-			}
-			scope := scopeAt(root, pos)
-			for s := scope; ; s = enclosingLambda(s) {
-				for _, c := range fnVarCandidates {
-					if enclosingLambda(c) == s {
-						return c, true
-					}
-				}
-				if s == nil {
-					break
-				}
-			}
-			return fnVarCandidates[0], true
-		}
-		return nil, false
+		return latest, latest != nil
 	case symbolVariable:
-		return resolveVarDefinition(root, sym)
+		return resolveVarDefinition(root, sym, pos)
 	default:
 		return nil, false
 	}
 }
 
-func scopeAt(root parse.Node, pos int) *parse.Primary {
-	p := np.Find(root, pos)
-	var primary *parse.Primary
-	if p.Match(np.Store(&primary)) {
-		return enclosingLambda(primary)
+func inScopeChain(from, target *parse.Primary) bool {
+	for scope := from; ; scope = enclosingLambda(scope) {
+		if scope == target {
+			return true
+		}
+		if scope == nil {
+			break
+		}
 	}
-	return nil
+	return false
 }
 
-func resolveVarDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
+func resolveVarDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary, bool) {
 	var candidates []*parse.Primary
 	walkParse(root, func(n parse.Node) bool {
 		primary, ok := n.(*parse.Primary)
 		if !ok {
 			return true
 		}
-		if isVarDefinition(primary, sym.name) || isLambdaParam(primary, sym.name) {
+		if isVarDeclaration(primary, sym.name) {
 			candidates = append(candidates, primary)
 		}
 		return true
@@ -221,31 +208,49 @@ func resolveVarDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool)
 	if len(candidates) == 0 {
 		return nil, false
 	}
+	// Elvish resolves variables sequentially as forms are compiled, so only
+	// declarations at or before the reference position take effect.
 	for scope := sym.scope; ; scope = enclosingLambda(scope) {
+		var latest *parse.Primary
 		for _, c := range candidates {
-			if enclosingLambda(c) == scope {
-				return c, true
+			if from := c.Range().From; declarationScope(c) == scope && from <= pos &&
+				(latest == nil || from > latest.Range().From) {
+				latest = c
 			}
+		}
+		if latest != nil {
+			return latest, true
 		}
 		if scope == nil {
 			break
 		}
 	}
-	return candidates[0], true
+	// No declaration precedes the reference anywhere in the scope chain; fall
+	// back to the earliest declaration visible from the chain.
+	for scope := sym.scope; ; scope = enclosingLambda(scope) {
+		var earliest *parse.Primary
+		for _, c := range candidates {
+			if from := c.Range().From; declarationScope(c) == scope &&
+				(earliest == nil || from < earliest.Range().From) {
+				earliest = c
+			}
+		}
+		if earliest != nil {
+			return earliest, true
+		}
+		if scope == nil {
+			break
+		}
+	}
+	return nil, false
 }
 
-func sameVarBinding(root parse.Node, sym symbolRef, primary *parse.Primary) bool {
-	pos := primary.Range().From
-	def, ok := resolveDefinition(root, sym, pos)
-	if !ok {
-		return sym.scope == nil || sym.scope == enclosingLambda(primary)
-	}
-	refSym := symbolRef{kind: sym.kind, name: sym.name, scope: enclosingLambda(primary)}
-	refDef, ok := resolveDefinition(root, refSym, pos)
-	if !ok {
-		return false
-	}
-	return refDef == def
+// bindingEquals reports whether the variable-name occurrence primary refers
+// to the same binding as target, resolving the occurrence at its own position.
+func bindingEquals(root parse.Node, name string, primary *parse.Primary, target *parse.Primary) bool {
+	occSym := symbolRef{kind: symbolVariable, name: name, scope: declarationScope(primary)}
+	def, ok := resolveVarDefinition(root, occSym, primary.Range().From)
+	return ok && def == target
 }
 
 func sameFunctionBinding(root parse.Node, sym symbolRef, primary *parse.Primary, target *parse.Primary) bool {
@@ -259,6 +264,10 @@ func sameFunctionBinding(root parse.Node, sym symbolRef, primary *parse.Primary,
 
 func isFnDefinition(primary *parse.Primary, name string) bool {
 	return isFnFormDefinition(primary, name) || isFunctionVarDefinition(primary, name)
+}
+
+func isFunctionDeclaration(primary *parse.Primary, name string) bool {
+	return isFnFormDefinition(primary, name) || isFunctionVarDeclaration(primary, name)
 }
 
 func isFnFormDefinition(primary *parse.Primary, name string) bool {
@@ -278,6 +287,14 @@ func isFnFormDefinition(primary *parse.Primary, name string) bool {
 }
 
 func isFunctionVarDefinition(primary *parse.Primary, name string) bool {
+	return functionVarOccurrence(primary, name, false)
+}
+
+func isFunctionVarDeclaration(primary *parse.Primary, name string) bool {
+	return functionVarOccurrence(primary, name, true)
+}
+
+func functionVarOccurrence(primary *parse.Primary, name string, declarationOnly bool) bool {
 	if !isStringPrimary(primary) {
 		return false
 	}
@@ -297,6 +314,9 @@ func isFunctionVarDefinition(primary *parse.Primary, name string) bool {
 	if !ok {
 		return false
 	}
+	if declarationOnly {
+		return head == "var"
+	}
 	return head == "var" || head == "set" || head == "tmp"
 }
 
@@ -307,10 +327,8 @@ func lambdaParamOwner(primary *parse.Primary) (*parse.Primary, bool) {
 	}
 	parent := parse.Parent(compound)
 	if lambda, ok := parent.(*parse.Primary); ok && lambda.Type == parse.Lambda {
-		for _, e := range lambda.Elements {
-			if e == compound {
-				return lambda, true
-			}
+		if slices.Contains(lambda.Elements, compound) {
+			return lambda, true
 		}
 		return nil, false
 	}
@@ -331,7 +349,14 @@ func isLambdaParam(primary *parse.Primary, name string) bool {
 }
 
 func enclosingLambda(primary *parse.Primary) *parse.Primary {
-	for cur := parse.Parent(primary); cur != nil; cur = parse.Parent(cur) {
+	if primary == nil {
+		return nil
+	}
+	return enclosingLambdaNode(primary)
+}
+
+func enclosingLambdaNode(n parse.Node) *parse.Primary {
+	for cur := parse.Parent(n); cur != nil; cur = parse.Parent(cur) {
 		if p, ok := cur.(*parse.Primary); ok && p.Type == parse.Lambda {
 			return p
 		}
@@ -339,74 +364,125 @@ func enclosingLambda(primary *parse.Primary) *parse.Primary {
 	return nil
 }
 func isVarDefinition(primary *parse.Primary, name string) bool {
+	_, _, ok := varOccurrence(primary, name)
+	return ok
+}
+
+// isVarDeclaration reports whether the primary creates a new binding for
+// name: a lambda parameter, a var LHS, or a for loop variable. set and tmp
+// only assign existing variables and are not declarations.
+func isVarDeclaration(primary *parse.Primary, name string) bool {
+	declares, _, ok := varOccurrence(primary, name)
+	return ok && declares
+}
+
+// declarationScope returns the lambda (or nil for the top level) that a
+// variable occurrence's binding lives in. For a simple for loop variable that
+// is the loop body lambda, mirroring the scope the compiler creates for it.
+func declarationScope(primary *parse.Primary) *parse.Primary {
+	if _, scope, ok := varOccurrenceInfo(primary); ok {
+		return scope
+	}
+	return enclosingLambda(primary)
+}
+
+func matchesVarName(primary *parse.Primary, name string) bool {
 	if !isStringPrimary(primary) {
 		return false
 	}
-	normName := normalizeVarName(name)
 	normPrimary := normalizeVarName(primary.Value)
-	if normPrimary != normName {
-		base, ok := functionVarBase(normPrimary)
-		if !ok || base != normName {
-			return false
-		}
-	}
-	if _, ok := lambdaParamOwner(primary); ok {
+	normName := normalizeVarName(name)
+	if normPrimary == normName {
 		return true
+	}
+	base, ok := functionVarBase(normPrimary)
+	return ok && base == normName
+}
+
+func varOccurrence(primary *parse.Primary, name string) (bool, *parse.Primary, bool) {
+	if !matchesVarName(primary, name) {
+		return false, nil, false
+	}
+	return varOccurrenceInfo(primary)
+}
+
+func varOccurrenceInfo(primary *parse.Primary) (bool, *parse.Primary, bool) {
+	if lambda, ok := lambdaParamOwner(primary); ok {
+		return true, lambda, true
 	}
 	compound, ok := parentCompound(primary)
 	if !ok {
-		return false
+		return false, nil, false
 	}
-	if form, ok := parse.Parent(compound).(*parse.Form); ok {
-		head, ok := parseStringLiteral(form.Head)
-		if !ok {
-			return false
-		}
-		switch head {
-		case "var", "set", "tmp":
-			for i, a := range form.Args {
-				if a == compound {
-					return assignmentLHS(form.Args, i)
-				}
-			}
-		case "for":
-			return len(form.Args) > 0 && form.Args[0] == compound
-		}
-	}
-	return inLHSCompound(compound)
-}
-
-func inLHSCompound(compound *parse.Compound) bool {
 	cur := parse.Node(compound)
 	for parent := parse.Parent(cur); parent != nil; cur, parent = parent, parse.Parent(parent) {
-		switch p := parent.(type) {
-		case *parse.Form:
-			head, ok := parseStringLiteral(p.Head)
-			if !ok {
+		form, isForm := parent.(*parse.Form)
+		if !isForm {
+			switch parent.(type) {
+			case *parse.Indexing, *parse.Compound, *parse.Primary, *parse.Chunk, *parse.Pipeline, *parse.Sep:
 				continue
+			default:
+				return false, nil, false
 			}
-			switch head {
-			case "var", "set", "tmp":
-				for i, a := range p.Args {
-					if a == cur || nodeContains(a, compound) {
-						return assignmentLHS(p.Args, i)
+		}
+		head, ok := parseStringLiteral(form.Head)
+		if !ok {
+			continue
+		}
+		switch head {
+		case "var":
+			for i, a := range form.Args {
+				if a == cur || nodeContains(a, compound) {
+					return assignmentLHS(form.Args, i), enclosingLambda(primary), true
+				}
+			}
+			return false, nil, false
+		case "set", "tmp":
+			// Assignments to existing variables, not declarations.
+			for _, a := range form.Args {
+				if a == cur || nodeContains(a, compound) {
+					return false, enclosingLambda(primary), true
+				}
+			}
+			return false, nil, false
+		case "for":
+			if len(form.Args) > 0 && (form.Args[0] == cur || nodeContains(form.Args[0], compound)) {
+				if form.Args[0] == compound {
+					if p, ok := compoundPrimary(compound); ok && p.Type == parse.Bareword {
+						if body := forBodyScope(form); body != nil {
+							return true, body, true
+						}
 					}
 				}
-				return false
-			case "for":
-				if len(p.Args) > 0 && (p.Args[0] == cur || nodeContains(p.Args[0], compound)) {
-					return true
-				}
-				return false
+				// A destructured loop variable is compiled into the enclosing
+				// scope, not the loop body scope.
+				return true, enclosingLambda(primary), true
 			}
-			continue
-		case *parse.Indexing, *parse.Compound, *parse.Primary, *parse.Chunk, *parse.Pipeline, *parse.Sep:
-			continue
+			return false, nil, false
 		default:
-			return false
+			// Unrelated form (e.g. a nested command inside a destructuring
+			// LHS); keep walking up to the enclosing form.
+			continue
 		}
 	}
-	return false
+	return false, nil, false
+}
+
+func forBodyScope(form *parse.Form) *parse.Primary {
+	if len(form.Args) > 2 {
+		if body, ok := compoundLambda(form.Args[2]); ok {
+			return body
+		}
+	}
+	return nil
+}
+
+func compoundLambda(n *parse.Compound) (*parse.Primary, bool) {
+	p, ok := compoundPrimary(n)
+	if !ok || p.Type != parse.Lambda {
+		return nil, false
+	}
+	return p, true
 }
 
 func nodeContains(parent, child parse.Node) bool {
@@ -446,8 +522,11 @@ func parentCompound(primary *parse.Primary) (*parse.Compound, bool) {
 func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration bool, pos int) []*parse.Primary {
 	sym = canonicalSymbol(root, sym, pos)
 	var targetFn *parse.Primary
+	var targetVar *parse.Primary
 	if sym.kind == symbolFunction || sym.kind == symbolCommand {
 		targetFn, _ = resolveDefinition(root, sym, pos)
+	} else if sym.kind == symbolVariable {
+		targetVar, _ = resolveVarDefinition(root, sym, pos)
 	}
 	var primaries []*parse.Primary
 	walkParse(root, func(n parse.Node) bool {
@@ -457,19 +536,22 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 		}
 		switch sym.kind {
 		case symbolVariable:
+			if targetVar == nil {
+				return true
+			}
 			if isLambdaParam(primary, sym.name) {
-				if includeDeclaration && sameVarBinding(root, sym, primary) {
+				if includeDeclaration && bindingEquals(root, sym.name, primary, targetVar) {
 					primaries = append(primaries, primary)
 				}
 				return true
 			}
 			if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
-				if sameVarBinding(root, sym, primary) {
+				if bindingEquals(root, sym.name, primary, targetVar) {
 					primaries = append(primaries, primary)
 				}
 				return true
 			}
-			if includeDeclaration && isVarDefinition(primary, sym.name) && sameVarBinding(root, sym, primary) {
+			if includeDeclaration && isVarDefinition(primary, sym.name) && bindingEquals(root, sym.name, primary, targetVar) {
 				primaries = append(primaries, primary)
 			}
 		case symbolFunction, symbolCommand:
@@ -510,15 +592,18 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 }
 
 func canonicalSymbol(root parse.Node, sym symbolRef, pos int) symbolRef {
-	if sym.kind == symbolVariable {
-		def, ok := resolveVarDefinition(root, sym)
-		if ok {
-			sym.scope = enclosingLambda(def)
+	switch sym.kind {
+	case symbolVariable:
+		if def, ok := resolveVarDefinition(root, sym, pos); ok {
+			sym.scope = declarationScope(def)
 		}
-	}
-	if sym.kind == symbolCommand {
-		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, pos); ok {
+	case symbolCommand:
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name, scope: sym.scope}, pos); ok {
 			sym.kind = symbolFunction
+		}
+	case symbolFunction:
+		if def, ok := resolveDefinition(root, sym, pos); ok {
+			sym.scope = declarationScope(def)
 		}
 	}
 	return sym
@@ -541,6 +626,22 @@ func normalizeRenameName(sym symbolRef, newName string) string {
 		}
 	}
 	return newName
+}
+
+// isValidVariableName reports whether name is a valid unquoted variable name,
+// following the same character rules as the parser.
+func isValidVariableName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 0x80 && unicode.IsPrint(r)) && !('0' <= r && r <= '9') &&
+			!('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') &&
+			r != '-' && r != '_' && r != ':' && r != '~' {
+			return false
+		}
+	}
+	return true
 }
 func renameNewText(p *parse.Primary, newName string) string {
 	if p.Type == parse.Variable {

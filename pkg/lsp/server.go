@@ -39,7 +39,6 @@ type document struct {
 	code      string
 	version   int
 	parseTree parse.Tree
-	parseErr  error
 }
 
 func newServer() *server {
@@ -75,10 +74,12 @@ func (s *server) exitHandler(ctx context.Context, _ json.RawMessage) (any, error
 	s.mu.Lock()
 	shutdown := s.shutdown
 	s.mu.Unlock()
+	// exit terminates the server with or without a preceding shutdown; the
+	// error only signals an abnormal (no-shutdown) exit.
+	go conn(ctx).Close()
 	if !shutdown {
 		return nil, &jsonrpc2.Error{Code: 1, Message: "exit before shutdown"}
 	}
-	go conn(ctx).Close()
 	return nil, nil
 }
 
@@ -230,8 +231,9 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 	var expr np.SimpleExprData
 	var form *parse.Form
 	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
-		sym := symbolRef{kind: symbolCommand, name: expr.Value}
-		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: expr.Value}, pos); ok {
+		scope := enclosingLambdaNode(expr.Compound)
+		sym := symbolRef{kind: symbolCommand, name: expr.Value, scope: scope}
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: expr.Value, scope: scope}, pos); ok {
 			sym.kind = symbolFunction
 		}
 		if _, ok := resolveDefinition(document.parseTree.Root, sym, pos); ok {
@@ -330,7 +332,7 @@ func (s *server) references(_ context.Context, params referenceParams) (any, err
 		return []lsp.Location{}, nil
 	}
 	if sym.kind == symbolCommand {
-		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}, pos); !ok {
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name, scope: sym.scope}, pos); !ok {
 			return []lsp.Location{}, nil
 		}
 	}
@@ -421,6 +423,10 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "cannot rename symbol"}
 	}
 	newName := normalizeRenameName(sym, params.NewName)
+	if !isValidVariableName(newName) {
+		return nil, &jsonrpc2.Error{
+			Code: jsonrpc2.CodeInvalidParams, Message: "invalid variable name: " + params.NewName}
+	}
 	refs := findReferencePrimaries(document.parseTree.Root, sym, true, pos)
 	edits := make([]lsp.TextEdit, 0, len(refs))
 	for _, p := range refs {
@@ -458,7 +464,7 @@ func (s *server) documentHighlight(_ context.Context, params lsp.DocumentHighlig
 func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, version int, code string) {
 	tree, err := parse.Parse(parse.Source{Name: string(uri), Code: code}, parse.Config{})
 	s.mu.Lock()
-	s.documents[uri] = document{code: code, version: version, parseTree: tree, parseErr: err}
+	s.documents[uri] = document{code: code, version: version, parseTree: tree}
 	s.diagSeq[uri]++
 	seq := s.diagSeq[uri]
 	s.mu.Unlock()

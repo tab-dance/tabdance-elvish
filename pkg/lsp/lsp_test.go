@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1147,5 +1148,157 @@ func TestRestLambdaParamDocumentSymbolAndRename(t *testing.T) {
 	}
 	if len(edit.Changes[testURI]) != 2 {
 		t.Fatalf("got edits %+v", edit.Changes[testURI])
+	}
+}
+
+func TestSetBeforeVarResolvesToOuterBinding(t *testing.T) {
+	f := setup(t)
+	//     0         1         2         3
+	//     0123456789012345678901234567890123456789
+	text := "var x = 1\nfn f { set x = 2; var x = 3; echo $x }\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	outer := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 5}}}
+	inner := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 22}, End: lsp.Position{Line: 1, Character: 23}}}
+	for _, test := range []struct {
+		name string
+		pos  lsp.Position
+		want lsp.Location
+	}{
+		{"set before var refers to outer", lsp.Position{Line: 1, Character: 11}, outer},
+		{"var declaration", lsp.Position{Line: 1, Character: 22}, inner},
+		{"use after var refers to var", lsp.Position{Line: 1, Character: 35}, inner},
+		{"use after lambda refers to outer", lsp.Position{Line: 2, Character: 6}, outer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got lsp.Location
+			err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+					TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+					Position:     test.pos,
+				},
+			}, &got)
+			if err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestForVariableScopedToLoopBody(t *testing.T) {
+	f := setup(t)
+	//     012345678901234567890
+	text := "var x = 1\nfor x [a] { echo $x }\necho $x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	forVar := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 4}, End: lsp.Position{Line: 1, Character: 5}}}
+	outer := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 5}}}
+	for _, test := range []struct {
+		name string
+		pos  lsp.Position
+		want lsp.Location
+	}{
+		{"use in body refers to loop var", lsp.Position{Line: 1, Character: 18}, forVar},
+		{"use after loop refers to outer var", lsp.Position{Line: 2, Character: 6}, outer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got lsp.Location
+			err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+					TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+					Position:     test.pos,
+				},
+			}, &got)
+			if err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 18},
+		},
+		NewName: "y",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if edits := edit.Changes[testURI]; len(edits) != 2 {
+		t.Fatalf("got %d edits, want only loop var and body use: %+v", len(edits), edits)
+	}
+}
+
+func TestInnerFnNotVisibleOutsideLambda(t *testing.T) {
+	f := setup(t)
+	//     0         1         2         3
+	//     0123456789012345678901234567890123456789
+	text := "fn foo { echo a }\nfn wrapper { fn foo { echo b }; foo }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	outer := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}}
+	inner := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 16}, End: lsp.Position{Line: 1, Character: 19}}}
+	for _, test := range []struct {
+		name string
+		pos  lsp.Position
+		want lsp.Location
+	}{
+		{"use inside lambda refers to inner fn", lsp.Position{Line: 1, Character: 32}, inner},
+		{"use outside lambda refers to outer fn", lsp.Position{Line: 2, Character: 0}, outer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got lsp.Location
+			err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+					TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+					Position:     test.pos,
+				},
+			}, &got)
+			if err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRenameRejectsInvalidName(t *testing.T) {
+	f := setup(t)
+	text := "var foo = 1\necho $foo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	for _, newName := range []string{"foo bar", "", "&&"} {
+		var edit lsp.WorkspaceEdit
+		err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+				TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+				Position:     lsp.Position{Line: 1, Character: 6},
+			},
+			NewName: newName,
+		}, &edit)
+		if err == nil || !strings.Contains(err.Error(), "invalid variable name") {
+			t.Errorf("NewName %q: got err %v, want invalid variable name error", newName, err)
+		}
+	}
+}
+
+func TestExitWithoutShutdownClosesConnection(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "exit", nil)
+	select {
+	case <-f.conn.DisconnectNotify():
+	case <-time.After(testutil.Scaled(time.Second)):
+		t.Fatalf("timed out waiting for disconnect after exit without shutdown")
 	}
 }
