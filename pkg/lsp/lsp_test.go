@@ -652,6 +652,21 @@ func TestDidChangeEmptyContentChanges(t *testing.T) {
 	}
 }
 
+func TestDidChangeRejectsIncremental(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
+	err := f.conn.Call(bgCtx, "textDocument/didChange", lsp.DidChangeTextDocumentParams{
+		TextDocument: lsp.VersionedTextDocumentIdentifier{TextDocumentIdentifier: lsp.TextDocumentIdentifier{URI: testURI}, Version: 2},
+		ContentChanges: []lsp.TextDocumentContentChangeEvent{{
+			Range: &lsp.Range{Start: lsp.Position{}, End: lsp.Position{}},
+			Text:  "x",
+		}},
+	}, &struct{}{})
+	if err == nil || err.Error() != (&jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "incremental change not supported"}).Error() {
+		t.Fatalf("got err %v", err)
+	}
+}
+
 func TestDocumentHighlight(t *testing.T) {
 	f := setup(t)
 	text := "var foo = 1\necho $foo\n"

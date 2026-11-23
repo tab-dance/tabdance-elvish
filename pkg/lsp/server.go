@@ -169,6 +169,9 @@ func (s *server) didChange(ctx context.Context, params lsp.DidChangeTextDocument
 	}
 	// ContentChanges includes full text since the server is only advertised to
 	// support that; see the initialize method.
+	if params.ContentChanges[0].Range != nil {
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "incremental change not supported"}
+	}
 	uri, content := params.TextDocument.URI, params.ContentChanges[0].Text
 	s.updateDocument(conn(ctx), uri, params.TextDocument.Version, content)
 	return nil, nil
