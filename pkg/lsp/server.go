@@ -39,15 +39,19 @@ func newServer() *server {
 
 func handler(s *server) jsonrpc2.Handler {
 	return routingHandler(map[string]method{
-		"initialize":              s.initialize,
-		"textDocument/didOpen":    convertMethod(s.didOpen),
-		"textDocument/didChange":  convertMethod(s.didChange),
-		"textDocument/hover":      convertMethod(s.hover),
-		"textDocument/completion": convertMethod(s.completion),
+		"initialize":                  s.initialize,
+		"initialized":                 noop,
+		"shutdown":                    noop,
+		"exit":                        noop,
+		"textDocument/didOpen":        convertMethod(s.didOpen),
+		"textDocument/didChange":      convertMethod(s.didChange),
+		"textDocument/didClose":       convertMethod(s.didClose),
+		"textDocument/hover":          convertMethod(s.hover),
+		"textDocument/completion":     convertMethod(s.completion),
+		"textDocument/definition":     convertMethod(s.definition),
+		"textDocument/references":     convertMethod(s.references),
+		"textDocument/documentSymbol": convertMethod(s.documentSymbol),
 
-		"textDocument/didClose": noop,
-		// Required by spec.
-		"initialized": noop,
 		// Called by clients even when server doesn't advertise support:
 		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
 		"workspace/didChangeWatchedFiles": noop,
@@ -93,9 +97,13 @@ func (s *server) initialize(_ context.Context, _ json.RawMessage) (any, error) {
 				OpenClose: true,
 				Change:    lsp.TDSyncKindFull,
 			},
-			CompletionProvider: &lsp.CompletionOptions{},
-			HoverProvider:      &lsp.HoverOptions{},
+			CompletionProvider:     &lsp.CompletionOptions{},
+			HoverProvider:          &lsp.HoverOptions{},
+			DefinitionProvider:     &lsp.DefinitionRegistrationOptions{},
+			ReferencesProvider:     &lsp.ReferenceRegistrationOptions{},
+			DocumentSymbolProvider: &lsp.DocumentSymbolRegistrationOptions{},
 		},
+		ServerInfo: lsp.ServerInfo{Name: "elvish"},
 	}, nil
 }
 
@@ -110,6 +118,11 @@ func (s *server) didChange(ctx context.Context, params lsp.DidChangeTextDocument
 	// support that; see the initialize method.
 	uri, content := params.TextDocument.URI, params.ContentChanges[0].Text
 	s.updateDocument(conn(ctx), uri, content)
+	return nil, nil
+}
+
+func (s *server) didClose(_ context.Context, params lsp.DidCloseTextDocumentParams) (any, error) {
+	delete(s.documents, params.TextDocument.URI)
 	return nil, nil
 }
 
@@ -163,15 +176,7 @@ func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any
 
 	lspItems := make([]lsp.CompletionItem, len(result.Items))
 	lspRange := lspRangeFromRange(code, result.Replace)
-	var kind lsp.CompletionItemKind
-	switch result.Name {
-	case "command":
-		kind = lsp.CIKFunction
-	case "variable":
-		kind = lsp.CIKVariable
-	default:
-		// TODO: Support more values of kind
-	}
+	kind := completionKind(result.Name)
 	for i, item := range result.Items {
 		lspItems[i] = lsp.CompletionItem{
 			Label: item.ToInsert,
@@ -183,6 +188,58 @@ func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any
 		}
 	}
 	return lspItems, nil
+}
+
+func (s *server) definition(_ context.Context, params lsp.DefinitionParams) (any, error) {
+	document, ok := s.documents[params.TextDocument.URI]
+	if !ok {
+		return nil, unknownDocument(params.TextDocument.URI)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok {
+		return nil, nil
+	}
+	def, ok := findDefinition(document.parseTree.Root, sym)
+	if !ok {
+		return nil, nil
+	}
+	return lsp.Location{
+		URI:   params.TextDocument.URI,
+		Range: lspRangeFromRange(document.code, def),
+	}, nil
+}
+
+type referenceParams struct {
+	lsp.TextDocumentPositionParams
+	Context lsp.ReferenceContext `json:"context"`
+}
+
+func (s *server) references(_ context.Context, params referenceParams) (any, error) {
+	uri := params.TextDocument.URI
+	document, ok := s.documents[uri]
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok {
+		return []lsp.Location{}, nil
+	}
+	ranges := findReferences(document.parseTree.Root, sym, params.Context.IncludeDeclaration)
+	locs := make([]lsp.Location, len(ranges))
+	for i, r := range ranges {
+		locs[i] = lsp.Location{URI: uri, Range: lspRangeFromRange(document.code, r)}
+	}
+	return locs, nil
+}
+
+func (s *server) documentSymbol(_ context.Context, params lsp.DocumentSymbolParams) (any, error) {
+	document, ok := s.documents[params.TextDocument.URI]
+	if !ok {
+		return nil, unknownDocument(params.TextDocument.URI)
+	}
+	return collectDocumentSymbols(document.code, document.parseTree.Root), nil
 }
 
 func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, code string) {
@@ -268,4 +325,308 @@ func walkString(s string, f func(i int, p lsp.Position) bool) {
 		lastCR = r == '\r'
 	}
 	f(len(s), p)
+}
+
+func completionKind(name string) lsp.CompletionItemKind {
+	switch name {
+	case "command":
+		return lsp.CIKFunction
+	case "variable":
+		return lsp.CIKVariable
+	case "index":
+		return lsp.CIKField
+	case "redir":
+		return lsp.CIKFile
+	default:
+		return lsp.CIKText
+	}
+}
+
+type symbolKind int
+
+const (
+	symbolNone symbolKind = iota
+	symbolVariable
+	symbolFunction
+	symbolCommand
+)
+
+type symbolRef struct {
+	kind symbolKind
+	name string
+}
+
+func symbolAt(root parse.Node, pos int) (symbolRef, bool) {
+	p := np.Find(root, pos)
+	var primary *parse.Primary
+	if p.Match(np.Store(&primary)) {
+		if primary.Type == parse.Variable && primary.Value != "" {
+			return symbolRef{kind: symbolVariable, name: normalizeVarName(primary.Value)}, true
+		}
+	}
+	var expr np.SimpleExprData
+	var form *parse.Form
+	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
+		if expr.Value != "" {
+			return symbolRef{kind: symbolCommand, name: expr.Value}, true
+		}
+	}
+	// Also check if cursor is on a function/variable definition name.
+	if len(p) > 0 {
+		if c, ok := p[0].(*parse.Compound); ok {
+			if s, ok := parseStringLiteral(c); ok {
+				if fn := enclosingFnName(c); fn != "" && fn == s {
+					return symbolRef{kind: symbolFunction, name: fn}, true
+				}
+			}
+		}
+	}
+	return symbolRef{}, false
+}
+
+func normalizeVarName(name string) string {
+	// Strip leading sigil like @ for rest vars.
+	for len(name) > 0 && (name[0] == '@') {
+		name = name[1:]
+	}
+	return name
+}
+
+func parseStringLiteral(n *parse.Compound) (string, bool) {
+	if n == nil || len(n.Indexings) != 1 || len(n.Indexings[0].Indices) != 0 {
+		return "", false
+	}
+	p := n.Indexings[0].Head
+	switch p.Type {
+	case parse.Bareword, parse.SingleQuoted, parse.DoubleQuoted:
+		return p.Value, true
+	default:
+		return "", false
+	}
+}
+
+func enclosingFnName(n parse.Node) string {
+	for cur := parse.Parent(n); cur != nil; cur = parse.Parent(cur) {
+		form, ok := cur.(*parse.Form)
+		if !ok {
+			continue
+		}
+		head, ok := parseStringLiteral(form.Head)
+		if !ok || head != "fn" || len(form.Args) < 1 {
+			continue
+		}
+		name, ok := parseStringLiteral(form.Args[0])
+		if !ok {
+			continue
+		}
+		return name
+	}
+	return ""
+}
+
+func findDefinition(root parse.Node, sym symbolRef) (diag.Ranging, bool) {
+	var found *parse.Primary
+	walkParse(root, func(n parse.Node) bool {
+		primary, ok := n.(*parse.Primary)
+		if !ok {
+			return true
+		}
+		switch sym.kind {
+		case symbolFunction, symbolCommand:
+			if isFnDefinition(primary, sym.name) {
+				found = primary
+				return false
+			}
+			if sym.kind == symbolCommand && isVarDefinition(primary, sym.name) {
+				found = primary
+				return false
+			}
+		case symbolVariable:
+			if isVarDefinition(primary, sym.name) {
+				found = primary
+				return false
+			}
+		}
+		return true
+	})
+	if found != nil {
+		return found.Range(), true
+	}
+	return diag.Ranging{}, false
+}
+
+func isFnDefinition(primary *parse.Primary, name string) bool {
+	if !isStringPrimary(primary) || primary.Value != name {
+		return false
+	}
+	compound, ok := parentCompound(primary)
+	if !ok {
+		return false
+	}
+	form, ok := parse.Parent(compound).(*parse.Form)
+	if !ok || len(form.Args) < 1 || form.Args[0] != compound {
+		return false
+	}
+	head, ok := parseStringLiteral(form.Head)
+	return ok && head == "fn"
+}
+
+func isVarDefinition(primary *parse.Primary, name string) bool {
+	if !isStringPrimary(primary) || normalizeVarName(primary.Value) != normalizeVarName(name) {
+		return false
+	}
+	compound, ok := parentCompound(primary)
+	if !ok {
+		return false
+	}
+	form, ok := parse.Parent(compound).(*parse.Form)
+	if !ok {
+		return false
+	}
+	head, ok := parseStringLiteral(form.Head)
+	if !ok {
+		return false
+	}
+	switch head {
+	case "var", "set", "tmp":
+		for i, a := range form.Args {
+			if a == compound && i < len(form.Args) {
+				// Args before '=' are LHS in typical forms.
+				if assignmentLHS(form.Args, i) {
+					return true
+				}
+			}
+		}
+	case "for":
+		return len(form.Args) > 0 && form.Args[0] == compound
+	}
+	return false
+}
+
+func assignmentLHS(args []*parse.Compound, idx int) bool {
+	for i, a := range args {
+		if s, ok := parseStringLiteral(a); ok && s == "=" {
+			return idx < i
+		}
+	}
+	return true
+}
+
+func isStringPrimary(p *parse.Primary) bool {
+	return p.Type == parse.Bareword || p.Type == parse.SingleQuoted || p.Type == parse.DoubleQuoted
+}
+
+func parentCompound(primary *parse.Primary) (*parse.Compound, bool) {
+	indexing, ok := parse.Parent(primary).(*parse.Indexing)
+	if !ok {
+		return nil, false
+	}
+	compound, ok := parse.Parent(indexing).(*parse.Compound)
+	return compound, ok
+}
+
+func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool) []diag.Ranging {
+	var ranges []diag.Ranging
+	walkParse(root, func(n parse.Node) bool {
+		primary, ok := n.(*parse.Primary)
+		if !ok {
+			return true
+		}
+		switch sym.kind {
+		case symbolVariable:
+			if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
+				ranges = append(ranges, primary.Range())
+				return true
+			}
+			if includeDeclaration && isVarDefinition(primary, sym.name) {
+				ranges = append(ranges, primary.Range())
+			}
+		case symbolFunction, symbolCommand:
+			if primary.Type == parse.Variable {
+				return true
+			}
+			if isStringPrimary(primary) && primary.Value == sym.name {
+				// command usage in head position or fn definition name
+				if includeDeclaration && isFnDefinition(primary, sym.name) {
+					ranges = append(ranges, primary.Range())
+					return true
+				}
+				if compound, ok := parentCompound(primary); ok {
+					if form, ok := parse.Parent(compound).(*parse.Form); ok && form.Head == compound {
+						ranges = append(ranges, primary.Range())
+					}
+				}
+			}
+		}
+		return true
+	})
+	return ranges
+}
+
+func collectDocumentSymbols(code string, root parse.Node) []lsp.DocumentSymbol {
+	var symbols []lsp.DocumentSymbol
+	walkParse(root, func(n parse.Node) bool {
+		form, ok := n.(*parse.Form)
+		if !ok {
+			return true
+		}
+		head, ok := parseStringLiteral(form.Head)
+		if !ok {
+			return true
+		}
+		switch head {
+		case "fn":
+			if len(form.Args) < 1 {
+				return true
+			}
+			name, ok := parseStringLiteral(form.Args[0])
+			if !ok {
+				return true
+			}
+			r := lspRangeFromRange(code, form)
+			sel := lspRangeFromRange(code, form.Args[0])
+			symbols = append(symbols, lsp.DocumentSymbol{
+				Name:           name,
+				Kind:           lsp.SKFunction,
+				Range:          &r,
+				SelectionRange: &sel,
+			})
+		case "var":
+			for _, a := range varDefinitionArgs(form.Args) {
+				name, ok := parseStringLiteral(a)
+				if !ok {
+					continue
+				}
+				r := lspRangeFromRange(code, a)
+				symbols = append(symbols, lsp.DocumentSymbol{
+					Name:           name,
+					Kind:           lsp.SKVariable,
+					Range:          &r,
+					SelectionRange: &r,
+				})
+			}
+		}
+		return true
+	})
+	return symbols
+}
+
+func varDefinitionArgs(args []*parse.Compound) []*parse.Compound {
+	var lhs []*parse.Compound
+	for _, a := range args {
+		if s, ok := parseStringLiteral(a); ok && s == "=" {
+			break
+		}
+		lhs = append(lhs, a)
+	}
+	return lhs
+}
+
+func walkParse(n parse.Node, f func(parse.Node) bool) {
+	if n == nil || !f(n) {
+		return
+	}
+	for _, ch := range parse.Children(n) {
+		walkParse(ch, f)
+	}
 }

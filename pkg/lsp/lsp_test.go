@@ -196,6 +196,91 @@ func TestCompletion(t *testing.T) {
 	}
 }
 
+func TestDefinition(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	want := lsp.Location{URI: testURI, Range: lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 3},
+		End:   lsp.Position{Line: 0, Character: 6},
+	}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestReferences(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/references", referenceParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		Context: lsp.ReferenceContext{IncludeDeclaration: true},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	want := []lsp.Location{
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}},
+		{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestDocumentSymbol(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nvar bar = 1\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got []lsp.DocumentSymbol
+	err := f.conn.Call(bgCtx, "textDocument/documentSymbol", lsp.DocumentSymbolParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	}, &got)
+	if err != nil {
+		t.Fatalf("got error %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d symbols, want 2: %+v", len(got), got)
+	}
+	if got[0].Name != "foo" || got[0].Kind != lsp.SKFunction {
+		t.Errorf("got first symbol %+v", got[0])
+	}
+	if got[1].Name != "bar" || got[1].Kind != lsp.SKVariable {
+		t.Errorf("got second symbol %+v", got[1])
+	}
+}
+
+func TestDidCloseRemovesDocument(t *testing.T) {
+	f := setup(t)
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams("echo"))
+	f.conn.Notify(bgCtx, "textDocument/didClose", lsp.DidCloseTextDocumentParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	})
+	var resp lsp.Hover
+	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 0, Character: 0},
+	}, &resp)
+	if err == nil || err.Error() != unknownDocument(testURI).Error() {
+		t.Errorf("got %v, want %v", err, unknownDocument(testURI))
+	}
+}
+
 var jsonrpcErrorTests = []struct {
 	name    string
 	method  string
@@ -212,6 +297,20 @@ var jsonrpcErrorTests = []struct {
 		lsp.CompletionParams{
 			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
 				TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}}},
+		unknownDocument("file://unknown")},
+	{"unknown document to definition", "textDocument/definition",
+		lsp.DefinitionParams{
+			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+				TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}}},
+		unknownDocument("file://unknown")},
+	{"unknown document to references", "textDocument/references",
+		referenceParams{
+			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+				TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}}},
+		unknownDocument("file://unknown")},
+	{"unknown document to documentSymbol", "textDocument/documentSymbol",
+		lsp.DocumentSymbolParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}},
 		unknownDocument("file://unknown")},
 }
 
