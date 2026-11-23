@@ -355,6 +355,45 @@ func TestWorkspaceSymbol(t *testing.T) {
 	}
 }
 
+func TestRename(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var prep lsp.Range
+	err := f.conn.Call(bgCtx, "textDocument/prepareRename", lsp.PrepareRenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &prep)
+	if err != nil {
+		t.Fatalf("prepareRename: %v", err)
+	}
+	if prep.Start.Line != 1 || prep.Start.Character != 0 {
+		t.Fatalf("got prep %+v", prep)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for _, e := range edits {
+		if e.NewText != "bar" {
+			t.Errorf("got edit %+v", e)
+		}
+	}
+}
+
 func TestShutdownRejectsRequests(t *testing.T) {
 	f := setup(t)
 	var shutdownResp any

@@ -117,6 +117,8 @@ func handler(s *server) jsonrpc2.Handler {
 		"textDocument/references":     convertMethod(s.references),
 		"textDocument/documentSymbol": convertMethod(s.documentSymbol),
 		"workspace/symbol":            convertMethod(s.workspaceSymbol),
+		"textDocument/prepareRename":  convertMethod(s.prepareRename),
+		"textDocument/rename":         convertMethod(s.rename),
 
 		// Called by clients even when server doesn't advertise support:
 		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
@@ -143,6 +145,7 @@ func (s *server) initialize(_ context.Context, _ json.RawMessage) (any, error) {
 			ReferencesProvider:      &lsp.ReferenceRegistrationOptions{},
 			DocumentSymbolProvider:  &lsp.DocumentSymbolRegistrationOptions{},
 			WorkspaceSymbolProvider: &lsp.WorkspaceSymbolRegistrationOptions{},
+			RenameProvider:          &lsp.RenameRegistrationOptions{RenameOptions: lsp.RenameOptions{PrepareProvider: true}},
 		},
 		ServerInfo: lsp.ServerInfo{Name: "elvish"},
 	}, nil
@@ -337,6 +340,52 @@ func (s *server) workspaceSymbol(_ context.Context, params lsp.WorkspaceSymbolPa
 		}
 	}
 	return out, nil
+}
+
+func (s *server) prepareRename(_ context.Context, params lsp.PrepareRenameParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
+		return nil, nil
+	}
+	rg, ok := symbolRangeAt(document.parseTree.Root, pos, sym)
+	if !ok {
+		return nil, nil
+	}
+	return lspRangeFromRange(document.code, rg), nil
+}
+
+func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+	pos := lspPositionToIdx(document.code, params.Position)
+	sym, ok := symbolAt(document.parseTree.Root, pos)
+	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
+		return nil, nil
+	}
+	ranges := findReferences(document.parseTree.Root, sym, true)
+	edits := make([]lsp.TextEdit, 0, len(ranges))
+	for _, r := range ranges {
+		edits = append(edits, lsp.TextEdit{
+			Range:   lspRangeFromRange(document.code, r),
+			NewText: params.NewName,
+		})
+	}
+	return lsp.WorkspaceEdit{
+		Changes: map[lsp.DocumentURI][]lsp.TextEdit{uri: edits},
+	}, nil
 }
 
 func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, version int, code string) {
@@ -539,6 +588,28 @@ func enclosingFnName(n parse.Node) string {
 		return name
 	}
 	return ""
+}
+
+func symbolRangeAt(root parse.Node, pos int, sym symbolRef) (diag.Ranging, bool) {
+	p := np.Find(root, pos)
+	var primary *parse.Primary
+	if !p.Match(np.Store(&primary)) {
+		return diag.Ranging{}, false
+	}
+	switch sym.kind {
+	case symbolVariable:
+		if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
+			return primary.Range(), true
+		}
+		if isVarDefinition(primary, sym.name) {
+			return primary.Range(), true
+		}
+	case symbolFunction, symbolCommand:
+		if isFnDefinition(primary, sym.name) || (isStringPrimary(primary) && primary.Value == sym.name) {
+			return primary.Range(), true
+		}
+	}
+	return diag.Ranging{}, false
 }
 
 func findDefinition(root parse.Node, sym symbolRef) (diag.Ranging, bool) {
