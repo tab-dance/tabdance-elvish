@@ -883,7 +883,7 @@ func renameNewText(p *parse.Primary, newName string) string {
 		if strings.HasSuffix(name, "~") {
 			suffix = "~"
 		}
-		return name[:i] + newName + suffix
+		return "$" + name[:i] + newName + suffix
 	}
 	if isStringPrimary(p) && strings.HasSuffix(p.Value, "~") {
 		return newName + "~"

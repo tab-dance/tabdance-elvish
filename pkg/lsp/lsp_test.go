@@ -417,7 +417,7 @@ func TestRenameFunctionVariable(t *testing.T) {
 	if len(edits) != 3 {
 		t.Fatalf("got %d edits: %+v", len(edits), edits)
 	}
-	for i, want := range []string{"bar~", "bar~", "bar~"} {
+	for i, want := range []string{"bar~", "bar~", "$bar~"} {
 		if edits[i].NewText != want {
 			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
 		}
@@ -443,7 +443,33 @@ func TestRenameLambdaParameter(t *testing.T) {
 	if len(edits) != 2 {
 		t.Fatalf("got %d edits: %+v", len(edits), edits)
 	}
-	for i, want := range []string{"prog", "prog"} {
+	for i, want := range []string{"prog", "$prog"} {
+		if edits[i].NewText != want {
+			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
+		}
+	}
+}
+
+func TestRenameVariableFromUse(t *testing.T) {
+	f := setup(t)
+	text := "fn external {|one two| echo $one $two }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 36},
+		},
+		NewName: "three",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for i, want := range []string{"three", "$three"} {
 		if edits[i].NewText != want {
 			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
 		}
