@@ -550,6 +550,36 @@ func TestRenameVariableWithDollarNewName(t *testing.T) {
 	}
 }
 
+func TestRenameNonRenamableCommand(t *testing.T) {
+	f := setup(t)
+	text := "echo hi\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var prep any
+	err := f.conn.Call(bgCtx, "textDocument/prepareRename", lsp.PrepareRenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 0},
+		},
+	}, &prep)
+	if err != nil {
+		t.Fatalf("prepareRename: %v", err)
+	}
+	if prep != nil {
+		t.Fatalf("got prep %#v, want nil", prep)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 0},
+		},
+		NewName: "print",
+	}, &edit)
+	if err == nil || err.Error() != (&jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "cannot rename symbol"}).Error() {
+		t.Fatalf("got err %v", err)
+	}
+}
+
 func TestRenameFunctionVariableFromUse(t *testing.T) {
 	f := setup(t)
 	text := "var foo~ = { }\nput $foo~\n"

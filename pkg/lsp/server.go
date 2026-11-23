@@ -362,14 +362,9 @@ func (s *server) prepareRename(_ context.Context, params lsp.PrepareRenameParams
 		return nil, unknownDocument(uri)
 	}
 	pos := lspPositionToIdx(document.code, params.Position)
-	sym, ok := symbolAt(document.parseTree.Root, pos)
-	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
+	sym, ok := renameTarget(document.parseTree.Root, pos)
+	if !ok {
 		return nil, nil
-	}
-	if sym.kind == symbolCommand {
-		if _, ok := findDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
-			sym.kind = symbolFunction
-		}
 	}
 	rg, ok := symbolRangeAt(document.parseTree.Root, pos, sym)
 	if !ok {
@@ -387,14 +382,9 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 		return nil, unknownDocument(uri)
 	}
 	pos := lspPositionToIdx(document.code, params.Position)
-	sym, ok := symbolAt(document.parseTree.Root, pos)
-	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
-		return nil, nil
-	}
-	if sym.kind == symbolCommand {
-		if _, ok := findDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
-			sym.kind = symbolFunction
-		}
+	sym, ok := renameTarget(document.parseTree.Root, pos)
+	if !ok {
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "cannot rename symbol"}
 	}
 	newName := normalizeRenameName(sym, params.NewName)
 	refs := findReferencePrimaries(document.parseTree.Root, sym, true)
@@ -651,6 +641,26 @@ func enclosingFnName(n parse.Node) string {
 	return ""
 }
 
+func renameTarget(root parse.Node, pos int) (symbolRef, bool) {
+	sym, ok := symbolAt(root, pos)
+	if !ok {
+		return symbolRef{}, false
+	}
+	switch sym.kind {
+	case symbolVariable:
+		return canonicalSymbol(root, sym), true
+	case symbolFunction:
+		return canonicalSymbol(root, sym), true
+	case symbolCommand:
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
+			sym.kind = symbolFunction
+			return canonicalSymbol(root, sym), true
+		}
+		return symbolRef{}, false
+	default:
+		return symbolRef{}, false
+	}
+}
 func symbolRangeAt(root parse.Node, pos int, sym symbolRef) (diag.Ranging, bool) {
 	p := np.Find(root, pos)
 	var primary *parse.Primary
