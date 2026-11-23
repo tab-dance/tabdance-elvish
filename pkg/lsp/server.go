@@ -208,7 +208,7 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 		name := "$" + normalizeVarName(primary.Value)
 		if sym.kind == symbolFunction {
 			name = sym.name
-		} else if def, ok := resolveDefinition(document.parseTree.Root, sym); ok {
+		} else if def, ok := resolveDefinition(document.parseTree.Root, sym, pos); ok {
 			if def.Type == parse.Variable {
 				if base, ok := functionVarBase(normalizeVarName(def.Value)); ok {
 					name = base
@@ -231,10 +231,10 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 	var form *parse.Form
 	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
 		sym := symbolRef{kind: symbolCommand, name: expr.Value}
-		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: expr.Value}); ok {
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: expr.Value}, pos); ok {
 			sym.kind = symbolFunction
 		}
-		if _, ok := resolveDefinition(document.parseTree.Root, sym); ok {
+		if _, ok := resolveDefinition(document.parseTree.Root, sym, pos); ok {
 			return nil, nil
 		}
 		if markdown, err := doc.Source(expr.Value); err == nil {
@@ -301,7 +301,7 @@ func (s *server) definition(_ context.Context, params lsp.DefinitionParams) (any
 	if !ok {
 		return nil, nil
 	}
-	def, ok := findDefinition(document.parseTree.Root, sym)
+	def, ok := findDefinition(document.parseTree.Root, sym, pos)
 	if !ok {
 		return nil, nil
 	}
@@ -330,7 +330,7 @@ func (s *server) references(_ context.Context, params referenceParams) (any, err
 		return []lsp.Location{}, nil
 	}
 	if sym.kind == symbolCommand {
-		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}); !ok {
+		if _, ok := resolveDefinition(document.parseTree.Root, symbolRef{kind: symbolFunction, name: sym.name}, pos); !ok {
 			return []lsp.Location{}, nil
 		}
 	}

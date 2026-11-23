@@ -123,7 +123,7 @@ func renameTarget(root parse.Node, pos int) (symbolRef, bool) {
 	case symbolFunction:
 		return canonicalSymbol(root, sym), true
 	case symbolCommand:
-		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, pos); ok {
 			sym.kind = symbolFunction
 			return canonicalSymbol(root, sym), true
 		}
@@ -160,15 +160,15 @@ func symbolRangeAt(root parse.Node, pos int, sym symbolRef) (diag.Ranging, bool)
 	return diag.Ranging{}, false
 }
 
-func findDefinition(root parse.Node, sym symbolRef) (diag.Ranging, bool) {
-	def, ok := resolveDefinition(root, sym)
+func findDefinition(root parse.Node, sym symbolRef, pos int) (diag.Ranging, bool) {
+	def, ok := resolveDefinition(root, sym, pos)
 	if !ok {
 		return diag.Ranging{}, false
 	}
 	return def.Range(), true
 }
 
-func resolveDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
+func resolveDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary, bool) {
 	switch sym.kind {
 	case symbolFunction, symbolCommand:
 		var found *parse.Primary
@@ -178,8 +178,9 @@ func resolveDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool) {
 				return true
 			}
 			if isFnDefinition(primary, sym.name) {
-				found = primary
-				return false
+				if pos < 0 || primary.Range().From <= pos {
+					found = primary
+				}
 			}
 			return true
 		})
@@ -223,12 +224,13 @@ func resolveVarDefinition(root parse.Node, sym symbolRef) (*parse.Primary, bool)
 }
 
 func sameVarBinding(root parse.Node, sym symbolRef, primary *parse.Primary) bool {
-	def, ok := resolveDefinition(root, sym)
+	pos := primary.Range().From
+	def, ok := resolveDefinition(root, sym, pos)
 	if !ok {
 		return sym.scope == nil || sym.scope == enclosingLambda(primary)
 	}
 	refSym := symbolRef{kind: sym.kind, name: sym.name, scope: enclosingLambda(primary)}
-	refDef, ok := resolveDefinition(root, refSym)
+	refDef, ok := resolveDefinition(root, refSym, pos)
 	if !ok {
 		return false
 	}
@@ -431,7 +433,7 @@ func canonicalSymbol(root parse.Node, sym symbolRef) symbolRef {
 		}
 	}
 	if sym.kind == symbolCommand {
-		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}); ok {
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, -1); ok {
 			sym.kind = symbolFunction
 		}
 	}

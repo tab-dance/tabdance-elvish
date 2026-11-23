@@ -937,3 +937,23 @@ func TestHoverShadowedVariableUsesResolvedBinding(t *testing.T) {
 		t.Fatalf("got hover %+v, want empty for shadowed local", got)
 	}
 }
+
+func TestRedefinedFunctionDefinitionUsesLatestBeforeUse(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { echo a }\nfoo\nfn foo { echo b }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var got lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+	}, &got)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	want := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("(-want +got):\n%s", diff)
+	}
+}
