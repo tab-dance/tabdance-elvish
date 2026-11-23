@@ -383,12 +383,13 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
 		return nil, nil
 	}
+	newName := normalizeRenameName(sym, params.NewName)
 	refs := findReferencePrimaries(document.parseTree.Root, sym, true)
 	edits := make([]lsp.TextEdit, 0, len(refs))
 	for _, p := range refs {
 		edits = append(edits, lsp.TextEdit{
 			Range:   lspRangeFromRange(document.code, p.Range()),
-			NewText: renameNewText(p, params.NewName),
+			NewText: renameNewText(p, newName),
 		})
 	}
 	return lsp.WorkspaceEdit{
@@ -872,6 +873,24 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 	return primaries
 }
 
+func normalizeRenameName(sym symbolRef, newName string) string {
+	if sym.kind == symbolVariable {
+		for strings.HasPrefix(newName, "$") || strings.HasPrefix(newName, "@") {
+			newName = newName[1:]
+		}
+		if base, ok := functionVarBase(newName); ok {
+			newName = base
+		}
+		return newName
+	}
+	if sym.kind == symbolFunction {
+		newName = strings.TrimPrefix(newName, "$")
+		if base, ok := functionVarBase(newName); ok {
+			return base
+		}
+	}
+	return newName
+}
 func renameNewText(p *parse.Primary, newName string) string {
 	if p.Type == parse.Variable {
 		name := p.Value

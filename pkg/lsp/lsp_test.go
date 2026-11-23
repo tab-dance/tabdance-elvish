@@ -476,6 +476,32 @@ func TestRenameVariableFromUse(t *testing.T) {
 	}
 }
 
+func TestRenameVariableWithDollarNewName(t *testing.T) {
+	f := setup(t)
+	text := "fn external {|one two| echo $one $two }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 36},
+		},
+		NewName: "$twofew",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	edits := edit.Changes[testURI]
+	if len(edits) != 2 {
+		t.Fatalf("got %d edits: %+v", len(edits), edits)
+	}
+	for i, want := range []string{"twofew", "$twofew"} {
+		if edits[i].NewText != want {
+			t.Errorf("edit[%d] = %+v, want NewText %q", i, edits[i], want)
+		}
+	}
+}
+
 func TestDocumentHighlight(t *testing.T) {
 	f := setup(t)
 	text := "var foo = 1\necho $foo\n"
