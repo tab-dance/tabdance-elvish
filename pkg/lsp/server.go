@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/sourcegraph/jsonrpc2"
@@ -14,6 +15,7 @@ import (
 	"src.elv.sh/pkg/mods/doc"
 	"src.elv.sh/pkg/parse"
 	"src.elv.sh/pkg/parse/np"
+	"src.elv.sh/pkg/ui"
 )
 
 var (
@@ -227,14 +229,15 @@ func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any
 	lspRange := lspRangeFromRange(code, result.Replace)
 	kind := completionKind(result.Name)
 	for i, item := range result.Items {
-		label := item.ToShow.String()
+		label := plainText(item.ToShow)
 		if label == "" {
 			label = item.ToInsert
 		}
 		lspItems[i] = lsp.CompletionItem{
-			Label:      label,
-			Kind:       kind,
-			FilterText: item.ToInsert,
+			Label:            label,
+			Kind:             kind,
+			FilterText:       item.ToInsert,
+			InsertTextFormat: lsp.ITFPlainText,
 			TextEdit: &lsp.TextEdit{
 				Range:   lspRange,
 				NewText: item.ToInsert,
@@ -396,6 +399,14 @@ func walkString(s string, f func(i int, p lsp.Position) bool) {
 		lastCR = r == '\r'
 	}
 	f(len(s), p)
+}
+
+func plainText(t ui.Text) string {
+	var sb strings.Builder
+	for _, seg := range t {
+		sb.WriteString(seg.Text)
+	}
+	return sb.String()
 }
 
 func completionKind(name string) lsp.CompletionItemKind {
