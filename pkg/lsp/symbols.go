@@ -334,27 +334,68 @@ func isVarDefinition(primary *parse.Primary, name string) bool {
 	if !ok {
 		return false
 	}
-	form, ok := parse.Parent(compound).(*parse.Form)
-	if !ok {
-		return false
-	}
-	head, ok := parseStringLiteral(form.Head)
-	if !ok {
-		return false
-	}
-	switch head {
-	case "var", "set", "tmp":
-		for i, a := range form.Args {
-			if a == compound {
-				if assignmentLHS(form.Args, i) {
-					return true
+	if form, ok := parse.Parent(compound).(*parse.Form); ok {
+		head, ok := parseStringLiteral(form.Head)
+		if !ok {
+			return false
+		}
+		switch head {
+		case "var", "set", "tmp":
+			for i, a := range form.Args {
+				if a == compound {
+					return assignmentLHS(form.Args, i)
 				}
 			}
+		case "for":
+			return len(form.Args) > 0 && form.Args[0] == compound
 		}
-	case "for":
-		return len(form.Args) > 0 && form.Args[0] == compound
+	}
+	return inLHSCompound(compound)
+}
+
+func inLHSCompound(compound *parse.Compound) bool {
+	cur := parse.Node(compound)
+	for parent := parse.Parent(cur); parent != nil; cur, parent = parent, parse.Parent(parent) {
+		switch p := parent.(type) {
+		case *parse.Form:
+			head, ok := parseStringLiteral(p.Head)
+			if !ok {
+				continue
+			}
+			switch head {
+			case "var", "set", "tmp":
+				for i, a := range p.Args {
+					if a == cur || nodeContains(a, compound) {
+						return assignmentLHS(p.Args, i)
+					}
+				}
+				return false
+			case "for":
+				if len(p.Args) > 0 && (p.Args[0] == cur || nodeContains(p.Args[0], compound)) {
+					return true
+				}
+				return false
+			}
+			continue
+		case *parse.Indexing, *parse.Compound, *parse.Primary, *parse.Chunk, *parse.Pipeline, *parse.Sep:
+			continue
+		default:
+			return false
+		}
 	}
 	return false
+}
+
+func nodeContains(parent, child parse.Node) bool {
+	found := false
+	walkParse(parent, func(n parse.Node) bool {
+		if n == child {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func assignmentLHS(args []*parse.Compound, idx int) bool {
@@ -539,34 +580,41 @@ func collectDocumentSymbols(code string, root parse.Node) []lsp.DocumentSymbol {
 			symbols = append(symbols, sym)
 		case "var", "set", "tmp":
 			for _, a := range varDefinitionArgs(form.Args) {
-				name, ok := parseStringLiteral(a)
-				if !ok {
-					continue
-				}
-				r := lspRangeFromRange(code, a)
-				symbols = append(symbols, lsp.DocumentSymbol{
-					Name:           normalizeVarName(name),
-					Kind:           lsp.SKVariable,
-					Range:          &r,
-					SelectionRange: &r,
-				})
+				symbols = append(symbols, varDefinitionSymbols(code, a)...)
 			}
 		case "for":
 			if len(form.Args) > 0 {
-				if name, ok := parseStringLiteral(form.Args[0]); ok {
-					r := lspRangeFromRange(code, form.Args[0])
-					symbols = append(symbols, lsp.DocumentSymbol{
-						Name:           normalizeVarName(name),
-						Kind:           lsp.SKVariable,
-						Range:          &r,
-						SelectionRange: &r,
-					})
-				}
+				symbols = append(symbols, varDefinitionSymbols(code, form.Args[0])...)
 			}
 		}
 		return true
 	})
 	return symbols
+}
+
+func varDefinitionSymbols(code string, n *parse.Compound) []lsp.DocumentSymbol {
+	if n == nil {
+		return nil
+	}
+	var syms []lsp.DocumentSymbol
+	walkParse(n, func(node parse.Node) bool {
+		primary, ok := node.(*parse.Primary)
+		if !ok || !isStringPrimary(primary) {
+			return true
+		}
+		if !isVarDefinition(primary, normalizeVarName(primary.Value)) {
+			return true
+		}
+		r := lspRangeFromRange(code, primary.Range())
+		syms = append(syms, lsp.DocumentSymbol{
+			Name:           normalizeVarName(primary.Value),
+			Kind:           lsp.SKVariable,
+			Range:          &r,
+			SelectionRange: &r,
+		})
+		return true
+	})
+	return syms
 }
 
 func lambdaParamSymbols(code string, n *parse.Compound) []lsp.DocumentSymbol {
@@ -576,20 +624,10 @@ func lambdaParamSymbols(code string, n *parse.Compound) []lsp.DocumentSymbol {
 	}
 	var syms []lsp.DocumentSymbol
 	for _, e := range primary.Elements {
-		name, ok := parseStringLiteral(e)
-		if !ok {
-			continue
-		}
-		r := lspRangeFromRange(code, e)
-		syms = append(syms, lsp.DocumentSymbol{Name: normalizeVarName(name), Kind: lsp.SKVariable, Range: &r, SelectionRange: &r})
+		syms = append(syms, varDefinitionSymbols(code, e)...)
 	}
 	for _, mp := range primary.MapPairs {
-		name, ok := parseStringLiteral(mp.Key)
-		if !ok {
-			continue
-		}
-		r := lspRangeFromRange(code, mp.Key)
-		syms = append(syms, lsp.DocumentSymbol{Name: normalizeVarName(name), Kind: lsp.SKVariable, Range: &r, SelectionRange: &r})
+		syms = append(syms, varDefinitionSymbols(code, mp.Key)...)
 	}
 	return syms
 }

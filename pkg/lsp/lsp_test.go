@@ -1078,3 +1078,74 @@ func TestRedefinedFunctionReferencesUseVisibleBinding(t *testing.T) {
 		t.Fatalf("(-want +got):\n%s", diff)
 	}
 }
+
+func TestDestructuringVarDefinitionAndRename(t *testing.T) {
+	f := setup(t)
+	text := "var (a b) = [1 2]\necho $a $b\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var def lsp.Location
+	err := f.conn.Call(bgCtx, "textDocument/definition", lsp.DefinitionParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+	}, &def)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	wantDef := lsp.Location{URI: testURI, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 5}, End: lsp.Position{Line: 0, Character: 6}}}
+	if diff := cmp.Diff(wantDef, def); diff != "" {
+		t.Fatalf("definition (-want +got):\n%s", diff)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 6},
+		},
+		NewName: "x",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	wantEdits := []lsp.TextEdit{
+		{Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 5}, End: lsp.Position{Line: 0, Character: 6}}, NewText: "x"},
+		{Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 5}, End: lsp.Position{Line: 1, Character: 7}}, NewText: "$x"},
+	}
+	if diff := cmp.Diff(wantEdits, edit.Changes[testURI]); diff != "" {
+		t.Fatalf("rename (-want +got):\n%s", diff)
+	}
+}
+
+func TestRestLambdaParamDocumentSymbolAndRename(t *testing.T) {
+	f := setup(t)
+	text := "fn f {|@rest &opt=1| echo $rest $opt }\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var syms []lsp.DocumentSymbol
+	err := f.conn.Call(bgCtx, "textDocument/documentSymbol", lsp.DocumentSymbolParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	}, &syms)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	if len(syms) != 1 || len(syms[0].Children) != 2 {
+		t.Fatalf("got %+v", syms)
+	}
+	if syms[0].Children[0].Name != "rest" || syms[0].Children[1].Name != "opt" {
+		t.Fatalf("got children %+v", syms[0].Children)
+	}
+	var edit lsp.WorkspaceEdit
+	err = f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 0, Character: 28},
+		},
+		NewName: "args",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if len(edit.Changes[testURI]) != 2 {
+		t.Fatalf("got edits %+v", edit.Changes[testURI])
+	}
+}
