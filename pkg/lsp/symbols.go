@@ -119,13 +119,13 @@ func renameTarget(root parse.Node, pos int) (symbolRef, bool) {
 	}
 	switch sym.kind {
 	case symbolVariable:
-		return canonicalSymbol(root, sym), true
+		return canonicalSymbol(root, sym, pos), true
 	case symbolFunction:
-		return canonicalSymbol(root, sym), true
+		return canonicalSymbol(root, sym, pos), true
 	case symbolCommand:
 		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, pos); ok {
 			sym.kind = symbolFunction
-			return canonicalSymbol(root, sym), true
+			return canonicalSymbol(root, sym, pos), true
 		}
 		return symbolRef{}, false
 	default:
@@ -171,21 +171,28 @@ func findDefinition(root parse.Node, sym symbolRef, pos int) (diag.Ranging, bool
 func resolveDefinition(root parse.Node, sym symbolRef, pos int) (*parse.Primary, bool) {
 	switch sym.kind {
 	case symbolFunction, symbolCommand:
-		var found *parse.Primary
+		var fnFound *parse.Primary
+		var fnVarFound *parse.Primary
 		walkParse(root, func(n parse.Node) bool {
 			primary, ok := n.(*parse.Primary)
 			if !ok {
 				return true
 			}
-			if isFnDefinition(primary, sym.name) {
+			if isFnFormDefinition(primary, sym.name) {
 				if pos < 0 || primary.Range().From <= pos {
-					found = primary
+					fnFound = primary
 				}
+			}
+			if isFunctionVarDefinition(primary, sym.name) {
+				fnVarFound = primary
 			}
 			return true
 		})
-		if found != nil {
-			return found, true
+		if fnFound != nil {
+			return fnFound, true
+		}
+		if fnVarFound != nil {
+			return resolveVarDefinition(root, symbolRef{kind: symbolVariable, name: sym.name, scope: enclosingLambda(fnVarFound)})
 		}
 		return nil, false
 	case symbolVariable:
@@ -237,14 +244,42 @@ func sameVarBinding(root parse.Node, sym symbolRef, primary *parse.Primary) bool
 	return refDef == def
 }
 
+func sameFunctionBinding(root parse.Node, sym symbolRef, primary *parse.Primary, target *parse.Primary) bool {
+	pos := primary.Range().From
+	def, ok := resolveDefinition(root, sym, pos)
+	if !ok {
+		return false
+	}
+	return def == target
+}
+
 func isFnDefinition(primary *parse.Primary, name string) bool {
+	return isFnFormDefinition(primary, name) || isFunctionVarDefinition(primary, name)
+}
+
+func isFnFormDefinition(primary *parse.Primary, name string) bool {
+	if !isStringPrimary(primary) || primary.Value != name {
+		return false
+	}
+	compound, ok := parentCompound(primary)
+	if !ok {
+		return false
+	}
+	form, ok := parse.Parent(compound).(*parse.Form)
+	if !ok || len(form.Args) < 1 || form.Args[0] != compound {
+		return false
+	}
+	head, ok := parseStringLiteral(form.Head)
+	return ok && head == "fn"
+}
+
+func isFunctionVarDefinition(primary *parse.Primary, name string) bool {
 	if !isStringPrimary(primary) {
 		return false
 	}
-	if primary.Value != name {
-		if base, ok := functionVarBase(primary.Value); !ok || base != name {
-			return false
-		}
+	base, ok := functionVarBase(primary.Value)
+	if !ok || base != name {
+		return false
 	}
 	compound, ok := parentCompound(primary)
 	if !ok {
@@ -258,14 +293,7 @@ func isFnDefinition(primary *parse.Primary, name string) bool {
 	if !ok {
 		return false
 	}
-	if head == "fn" {
-		return primary.Value == name
-	}
-	if head == "var" || head == "set" || head == "tmp" {
-		base, ok := functionVarBase(primary.Value)
-		return ok && base == name
-	}
-	return false
+	return head == "var" || head == "set" || head == "tmp"
 }
 
 func lambdaParamOwner(primary *parse.Primary) (*parse.Primary, bool) {
@@ -370,8 +398,12 @@ func parentCompound(primary *parse.Primary) (*parse.Compound, bool) {
 	return compound, ok
 }
 
-func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration bool) []*parse.Primary {
-	sym = canonicalSymbol(root, sym)
+func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration bool, pos int) []*parse.Primary {
+	sym = canonicalSymbol(root, sym, pos)
+	var targetFn *parse.Primary
+	if sym.kind == symbolFunction || sym.kind == symbolCommand {
+		targetFn, _ = resolveDefinition(root, sym, pos)
+	}
 	var primaries []*parse.Primary
 	walkParse(root, func(n parse.Node) bool {
 		primary, ok := n.(*parse.Primary)
@@ -396,9 +428,14 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 				primaries = append(primaries, primary)
 			}
 		case symbolFunction, symbolCommand:
+			if targetFn == nil {
+				return true
+			}
 			if primary.Type == parse.Variable {
 				if base, ok := functionVarBase(normalizeVarName(primary.Value)); ok && base == sym.name {
-					primaries = append(primaries, primary)
+					if sameFunctionBinding(root, sym, primary, targetFn) {
+						primaries = append(primaries, primary)
+					}
 				}
 				return true
 			}
@@ -407,14 +444,16 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 				base, isFnVar := functionVarBase(val)
 				if val == sym.name || (isFnVar && base == sym.name) {
 					if isFnDefinition(primary, sym.name) {
-						if includeDeclaration {
+						if includeDeclaration && sameFunctionBinding(root, sym, primary, targetFn) {
 							primaries = append(primaries, primary)
 						}
 						return true
 					}
 					if compound, ok := parentCompound(primary); ok {
 						if form, ok := parse.Parent(compound).(*parse.Form); ok && form.Head == compound {
-							primaries = append(primaries, primary)
+							if sameFunctionBinding(root, sym, primary, targetFn) {
+								primaries = append(primaries, primary)
+							}
 						}
 					}
 				}
@@ -425,7 +464,7 @@ func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration b
 	return primaries
 }
 
-func canonicalSymbol(root parse.Node, sym symbolRef) symbolRef {
+func canonicalSymbol(root parse.Node, sym symbolRef, pos int) symbolRef {
 	if sym.kind == symbolVariable {
 		def, ok := resolveVarDefinition(root, sym)
 		if ok {
@@ -433,7 +472,7 @@ func canonicalSymbol(root parse.Node, sym symbolRef) symbolRef {
 		}
 	}
 	if sym.kind == symbolCommand {
-		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, -1); ok {
+		if _, ok := resolveDefinition(root, symbolRef{kind: symbolFunction, name: sym.name}, pos); ok {
 			sym.kind = symbolFunction
 		}
 	}
@@ -476,8 +515,8 @@ func renameNewText(p *parse.Primary, newName string) string {
 	}
 	return newName
 }
-func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool) []diag.Ranging {
-	primaries := findReferencePrimaries(root, sym, includeDeclaration)
+func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool, pos int) []diag.Ranging {
+	primaries := findReferencePrimaries(root, sym, includeDeclaration, pos)
 	ranges := make([]diag.Ranging, len(primaries))
 	for i, p := range primaries {
 		ranges[i] = p.Range()

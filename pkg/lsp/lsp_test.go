@@ -957,3 +957,28 @@ func TestRedefinedFunctionDefinitionUsesLatestBeforeUse(t *testing.T) {
 		t.Fatalf("(-want +got):\n%s", diff)
 	}
 }
+
+func TestRedefinedFunctionRenameUsesVisibleBinding(t *testing.T) {
+	f := setup(t)
+	text := "fn foo { echo a }\nfoo\nfn foo { echo b }\nfoo\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	var edit lsp.WorkspaceEdit
+	err := f.conn.Call(bgCtx, "textDocument/rename", lsp.RenameParams{
+		TextDocumentPositionParams: lsp.TextDocumentPositionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+			Position:     lsp.Position{Line: 1, Character: 0},
+		},
+		NewName: "bar",
+	}, &edit)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got := edit.Changes[testURI]
+	want := []lsp.TextEdit{
+		{Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 6}}, NewText: "bar"},
+		{Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 3}}, NewText: "bar"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("(-want +got):\n%s", diff)
+	}
+}

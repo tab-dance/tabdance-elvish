@@ -334,7 +334,7 @@ func (s *server) references(_ context.Context, params referenceParams) (any, err
 			return []lsp.Location{}, nil
 		}
 	}
-	ranges := findReferences(document.parseTree.Root, sym, params.Context.IncludeDeclaration)
+	ranges := findReferences(document.parseTree.Root, sym, params.Context.IncludeDeclaration, pos)
 	locs := make([]lsp.Location, len(ranges))
 	for i, r := range ranges {
 		locs[i] = lsp.Location{URI: uri, Range: lspRangeFromRange(document.code, r)}
@@ -421,7 +421,7 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: "cannot rename symbol"}
 	}
 	newName := normalizeRenameName(sym, params.NewName)
-	refs := findReferencePrimaries(document.parseTree.Root, sym, true)
+	refs := findReferencePrimaries(document.parseTree.Root, sym, true, pos)
 	edits := make([]lsp.TextEdit, 0, len(refs))
 	for _, p := range refs {
 		edits = append(edits, lsp.TextEdit{
@@ -447,7 +447,7 @@ func (s *server) documentHighlight(_ context.Context, params lsp.DocumentHighlig
 	if !ok {
 		return []lsp.DocumentHighlight{}, nil
 	}
-	ranges := findReferences(document.parseTree.Root, sym, true)
+	ranges := findReferences(document.parseTree.Root, sym, true, pos)
 	highlights := make([]lsp.DocumentHighlight, len(ranges))
 	for i, r := range ranges {
 		highlights[i] = lsp.DocumentHighlight{Range: lspRangeFromRange(document.code, r)}
