@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/sourcegraph/jsonrpc2"
 	lsp "pkg.nimblebun.works/go-lsp"
@@ -20,9 +21,12 @@ var (
 		Code: jsonrpc2.CodeMethodNotFound, Message: "method not found"}
 	errInvalidParams = &jsonrpc2.Error{
 		Code: jsonrpc2.CodeInvalidParams, Message: "invalid params"}
+	errInvalidRequest = &jsonrpc2.Error{
+		Code: jsonrpc2.CodeInvalidRequest, Message: "invalid request"}
 )
 
 type server struct {
+	mu        sync.Mutex
 	evaler    *eval.Evaler
 	documents map[lsp.DocumentURI]document
 	diagSeq   map[lsp.DocumentURI]int
@@ -44,8 +48,59 @@ func newServer() *server {
 	}
 }
 
+type method func(context.Context, json.RawMessage) (any, error)
+
+func convertMethod[T any](f func(context.Context, T) (any, error)) method {
+	return func(ctx context.Context, rawParams json.RawMessage) (any, error) {
+		var params T
+		if json.Unmarshal(rawParams, &params) != nil {
+			return nil, errInvalidParams
+		}
+		return f(ctx, params)
+	}
+}
+
+func noop(_ context.Context, _ json.RawMessage) (any, error) { return nil, nil }
+
+func (s *server) shutdownHandler(_ context.Context, _ json.RawMessage) (any, error) {
+	s.mu.Lock()
+	s.shutdown = true
+	s.mu.Unlock()
+	return nil, nil
+}
+
+func (s *server) exitHandler(_ context.Context, _ json.RawMessage) (any, error) {
+	s.mu.Lock()
+	shutdown := s.shutdown
+	s.mu.Unlock()
+	if !shutdown {
+		return nil, &jsonrpc2.Error{Code: 1, Message: "exit before shutdown"}
+	}
+	return nil, nil
+}
+
+type connKey struct{}
+
+func routingHandler(s *server, methods map[string]method) jsonrpc2.Handler {
+	return jsonrpc2.HandlerWithError(func(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
+		if req.Method != "initialize" && req.Method != "initialized" && req.Method != "shutdown" && req.Method != "exit" {
+			s.mu.Lock()
+			shutdown := s.shutdown
+			s.mu.Unlock()
+			if shutdown {
+				return nil, errInvalidRequest
+			}
+		}
+		fn, ok := methods[req.Method]
+		if !ok {
+			return nil, errMethodNotFound
+		}
+		return fn(context.WithValue(ctx, connKey{}, conn), *req.Params)
+	})
+}
+
 func handler(s *server) jsonrpc2.Handler {
-	return routingHandler(map[string]method{
+	return routingHandler(s, map[string]method{
 		"initialize":                  s.initialize,
 		"initialized":                 noop,
 		"shutdown":                    s.shutdownHandler,
@@ -62,44 +117,6 @@ func handler(s *server) jsonrpc2.Handler {
 		// Called by clients even when server doesn't advertise support:
 		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
 		"workspace/didChangeWatchedFiles": noop,
-	})
-}
-
-type method func(context.Context, json.RawMessage) (any, error)
-
-func convertMethod[T any](f func(context.Context, T) (any, error)) method {
-	return func(ctx context.Context, rawParams json.RawMessage) (any, error) {
-		var params T
-		if json.Unmarshal(rawParams, &params) != nil {
-			return nil, errInvalidParams
-		}
-		return f(ctx, params)
-	}
-}
-
-func noop(_ context.Context, _ json.RawMessage) (any, error) { return nil, nil }
-
-func (s *server) shutdownHandler(_ context.Context, _ json.RawMessage) (any, error) {
-	s.shutdown = true
-	return nil, nil
-}
-
-func (s *server) exitHandler(_ context.Context, _ json.RawMessage) (any, error) {
-	if s.shutdown {
-		return nil, nil
-	}
-	return nil, &jsonrpc2.Error{Code: 1, Message: "exit before shutdown"}
-}
-
-type connKey struct{}
-
-func routingHandler(methods map[string]method) jsonrpc2.Handler {
-	return jsonrpc2.HandlerWithError(func(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
-		fn, ok := methods[req.Method]
-		if !ok {
-			return nil, errMethodNotFound
-		}
-		return fn(context.WithValue(ctx, connKey{}, conn), *req.Params)
 	})
 }
 
@@ -140,16 +157,24 @@ func (s *server) didChange(ctx context.Context, params lsp.DidChangeTextDocument
 	return nil, nil
 }
 
-func (s *server) didClose(_ context.Context, params lsp.DidCloseTextDocumentParams) (any, error) {
-	delete(s.documents, params.TextDocument.URI)
-	delete(s.diagSeq, params.TextDocument.URI)
+func (s *server) didClose(ctx context.Context, params lsp.DidCloseTextDocumentParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	delete(s.documents, uri)
+	delete(s.diagSeq, uri)
+	s.mu.Unlock()
+	_ = conn(ctx).Notify(context.Background(), "textDocument/publishDiagnostics",
+		lsp.PublishDiagnosticsParams{URI: uri, Diagnostics: []lsp.Diagnostic{}})
 	return nil, nil
 }
 
 func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams) (any, error) {
-	document, ok := s.documents[params.TextDocument.URI]
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
-		return nil, unknownDocument(params.TextDocument.URI)
+		return nil, unknownDocument(uri)
 	}
 	pos := lspPositionToIdx(document.code, params.Position)
 
@@ -177,9 +202,12 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 }
 
 func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any, error) {
-	document, ok := s.documents[params.TextDocument.URI]
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
-		return nil, unknownDocument(params.TextDocument.URI)
+		return nil, unknownDocument(uri)
 	}
 	code := document.code
 	result, err := complete.Complete(
@@ -216,9 +244,12 @@ func (s *server) completion(_ context.Context, params lsp.CompletionParams) (any
 }
 
 func (s *server) definition(_ context.Context, params lsp.DefinitionParams) (any, error) {
-	document, ok := s.documents[params.TextDocument.URI]
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
-		return nil, unknownDocument(params.TextDocument.URI)
+		return nil, unknownDocument(uri)
 	}
 	pos := lspPositionToIdx(document.code, params.Position)
 	sym, ok := symbolAt(document.parseTree.Root, pos)
@@ -242,7 +273,9 @@ type referenceParams struct {
 
 func (s *server) references(_ context.Context, params referenceParams) (any, error) {
 	uri := params.TextDocument.URI
+	s.mu.Lock()
 	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
 		return nil, unknownDocument(uri)
 	}
@@ -260,18 +293,23 @@ func (s *server) references(_ context.Context, params referenceParams) (any, err
 }
 
 func (s *server) documentSymbol(_ context.Context, params lsp.DocumentSymbolParams) (any, error) {
-	document, ok := s.documents[params.TextDocument.URI]
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	document, ok := s.documents[uri]
+	s.mu.Unlock()
 	if !ok {
-		return nil, unknownDocument(params.TextDocument.URI)
+		return nil, unknownDocument(uri)
 	}
 	return collectDocumentSymbols(document.code, document.parseTree.Root), nil
 }
 
 func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, version int, code string) {
 	tree, err := parse.Parse(parse.Source{Name: string(uri), Code: code}, parse.Config{})
+	s.mu.Lock()
 	s.documents[uri] = document{code: code, version: version, parseTree: tree, parseErr: err}
 	s.diagSeq[uri]++
 	seq := s.diagSeq[uri]
+	s.mu.Unlock()
 	go func() {
 		entries := parse.UnpackErrors(err)
 		diags := make([]lsp.Diagnostic, len(entries))
@@ -283,10 +321,13 @@ func (s *server) updateDocument(conn *jsonrpc2.Conn, uri lsp.DocumentURI, versio
 				Message:  err.Message,
 			}
 		}
-		if s.diagSeq[uri] != seq {
+		s.mu.Lock()
+		current := s.diagSeq[uri]
+		s.mu.Unlock()
+		if current != seq {
 			return
 		}
-		conn.Notify(context.Background(), "textDocument/publishDiagnostics",
+		_ = conn.Notify(context.Background(), "textDocument/publishDiagnostics",
 			lsp.PublishDiagnosticsParams{URI: uri, Version: version, Diagnostics: diags})
 	}()
 }

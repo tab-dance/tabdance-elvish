@@ -328,6 +328,7 @@ func TestDidCloseRemovesDocument(t *testing.T) {
 	f.conn.Notify(bgCtx, "textDocument/didClose", lsp.DidCloseTextDocumentParams{
 		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
 	})
+	checkDiag(t, f, lsp.PublishDiagnosticsParams{URI: testURI, Diagnostics: []lsp.Diagnostic{}})
 	var resp lsp.Hover
 	err := f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
 		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
@@ -335,6 +336,22 @@ func TestDidCloseRemovesDocument(t *testing.T) {
 	}, &resp)
 	if err == nil || err.Error() != unknownDocument(testURI).Error() {
 		t.Errorf("got %v, want %v", err, unknownDocument(testURI))
+	}
+}
+
+func TestShutdownRejectsRequests(t *testing.T) {
+	f := setup(t)
+	var shutdownResp any
+	err := f.conn.Call(bgCtx, "shutdown", struct{}{}, &shutdownResp)
+	if err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	err = f.conn.Call(bgCtx, "textDocument/hover", lsp.TextDocumentPositionParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Position:     lsp.Position{Line: 0, Character: 0},
+	}, &lsp.Hover{})
+	if err == nil || err.Error() != errInvalidRequest.Error() {
+		t.Errorf("got %v, want %v", err, errInvalidRequest)
 	}
 }
 
@@ -469,7 +486,7 @@ type client struct {
 }
 
 func (c *client) handler() jsonrpc2.Handler {
-	return routingHandler(map[string]method{
+	return routingHandler(&server{documents: map[lsp.DocumentURI]document{}, diagSeq: map[lsp.DocumentURI]int{}}, map[string]method{
 		"textDocument/publishDiagnostics": c.publishDiagnostics,
 	})
 }
