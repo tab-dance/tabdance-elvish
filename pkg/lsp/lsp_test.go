@@ -249,7 +249,7 @@ func TestReferences(t *testing.T) {
 
 func TestDocumentSymbol(t *testing.T) {
 	f := setup(t)
-	text := "fn foo { }\nvar bar = 1\nset bar = 2\nfor x [a] { }\n"
+	text := "fn foo {|a &b=c| }\nvar bar = 1\nset bar = 2\nfor x [a] { }\n"
 	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
 	var got []lsp.DocumentSymbol
 	err := f.conn.Call(bgCtx, "textDocument/documentSymbol", lsp.DocumentSymbolParams{
@@ -266,6 +266,9 @@ func TestDocumentSymbol(t *testing.T) {
 		if got[i].Name != name {
 			t.Errorf("got[%d].Name = %q, want %q", i, got[i].Name, name)
 		}
+	}
+	if len(got[0].Children) != 2 || got[0].Children[0].Name != "a" || got[0].Children[1].Name != "b" {
+		t.Fatalf("got fn children %+v", got[0].Children)
 	}
 }
 

@@ -1037,12 +1037,16 @@ func collectDocumentSymbols(code string, root parse.Node) []lsp.DocumentSymbol {
 			}
 			r := lspRangeFromRange(code, form)
 			sel := lspRangeFromRange(code, form.Args[0])
-			symbols = append(symbols, lsp.DocumentSymbol{
+			sym := lsp.DocumentSymbol{
 				Name:           name,
 				Kind:           lsp.SKFunction,
 				Range:          &r,
 				SelectionRange: &sel,
-			})
+			}
+			if len(form.Args) > 1 {
+				sym.Children = lambdaParamSymbols(code, form.Args[1])
+			}
+			symbols = append(symbols, sym)
 		case "var", "set", "tmp":
 			for _, a := range varDefinitionArgs(form.Args) {
 				name, ok := parseStringLiteral(a)
@@ -1075,6 +1079,37 @@ func collectDocumentSymbols(code string, root parse.Node) []lsp.DocumentSymbol {
 	return symbols
 }
 
+func lambdaParamSymbols(code string, n *parse.Compound) []lsp.DocumentSymbol {
+	primary, ok := compoundPrimary(n)
+	if !ok || primary.Type != parse.Lambda {
+		return nil
+	}
+	var syms []lsp.DocumentSymbol
+	for _, e := range primary.Elements {
+		name, ok := parseStringLiteral(e)
+		if !ok {
+			continue
+		}
+		r := lspRangeFromRange(code, e)
+		syms = append(syms, lsp.DocumentSymbol{Name: normalizeVarName(name), Kind: lsp.SKVariable, Range: &r, SelectionRange: &r})
+	}
+	for _, mp := range primary.MapPairs {
+		name, ok := parseStringLiteral(mp.Key)
+		if !ok {
+			continue
+		}
+		r := lspRangeFromRange(code, mp.Key)
+		syms = append(syms, lsp.DocumentSymbol{Name: normalizeVarName(name), Kind: lsp.SKVariable, Range: &r, SelectionRange: &r})
+	}
+	return syms
+}
+
+func compoundPrimary(n *parse.Compound) (*parse.Primary, bool) {
+	if n == nil || len(n.Indexings) != 1 || len(n.Indexings[0].Indices) != 0 {
+		return nil, false
+	}
+	return n.Indexings[0].Head, true
+}
 func varDefinitionArgs(args []*parse.Compound) []*parse.Compound {
 	var lhs []*parse.Compound
 	for _, a := range args {
