@@ -375,12 +375,12 @@ func (s *server) rename(_ context.Context, params lsp.RenameParams) (any, error)
 	if !ok || (sym.kind != symbolVariable && sym.kind != symbolFunction && sym.kind != symbolCommand) {
 		return nil, nil
 	}
-	ranges := findReferences(document.parseTree.Root, sym, true)
-	edits := make([]lsp.TextEdit, 0, len(ranges))
-	for _, r := range ranges {
+	refs := findReferencePrimaries(document.parseTree.Root, sym, true)
+	edits := make([]lsp.TextEdit, 0, len(refs))
+	for _, p := range refs {
 		edits = append(edits, lsp.TextEdit{
-			Range:   lspRangeFromRange(document.code, r),
-			NewText: params.NewName,
+			Range:   lspRangeFromRange(document.code, p.Range()),
+			NewText: renameNewText(p, params.NewName),
 		})
 	}
 	return lsp.WorkspaceEdit{
@@ -713,8 +713,8 @@ func parentCompound(primary *parse.Primary) (*parse.Compound, bool) {
 	return compound, ok
 }
 
-func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool) []diag.Ranging {
-	var ranges []diag.Ranging
+func findReferencePrimaries(root parse.Node, sym symbolRef, includeDeclaration bool) []*parse.Primary {
+	var primaries []*parse.Primary
 	walkParse(root, func(n parse.Node) bool {
 		primary, ok := n.(*parse.Primary)
 		if !ok {
@@ -723,11 +723,11 @@ func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool) []d
 		switch sym.kind {
 		case symbolVariable:
 			if primary.Type == parse.Variable && normalizeVarName(primary.Value) == normalizeVarName(sym.name) {
-				ranges = append(ranges, primary.Range())
+				primaries = append(primaries, primary)
 				return true
 			}
 			if includeDeclaration && isVarDefinition(primary, sym.name) {
-				ranges = append(ranges, primary.Range())
+				primaries = append(primaries, primary)
 			}
 		case symbolFunction, symbolCommand:
 			if primary.Type == parse.Variable {
@@ -736,19 +736,39 @@ func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool) []d
 			if isStringPrimary(primary) && primary.Value == sym.name {
 				if isFnDefinition(primary, sym.name) {
 					if includeDeclaration {
-						ranges = append(ranges, primary.Range())
+						primaries = append(primaries, primary)
 					}
 					return true
 				}
 				if compound, ok := parentCompound(primary); ok {
 					if form, ok := parse.Parent(compound).(*parse.Form); ok && form.Head == compound {
-						ranges = append(ranges, primary.Range())
+						primaries = append(primaries, primary)
 					}
 				}
 			}
 		}
 		return true
 	})
+	return primaries
+}
+
+func renameNewText(p *parse.Primary, newName string) string {
+	if p.Type == parse.Variable {
+		name := p.Value
+		i := 0
+		for i < len(name) && name[i] == '@' {
+			i++
+		}
+		return name[:i] + newName
+	}
+	return newName
+}
+func findReferences(root parse.Node, sym symbolRef, includeDeclaration bool) []diag.Ranging {
+	primaries := findReferencePrimaries(root, sym, includeDeclaration)
+	ranges := make([]diag.Ranging, len(primaries))
+	for i, p := range primaries {
+		ranges[i] = p.Range()
+	}
 	return ranges
 }
 
