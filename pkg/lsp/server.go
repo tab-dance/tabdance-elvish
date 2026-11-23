@@ -199,23 +199,23 @@ func (s *server) hover(_ context.Context, params lsp.TextDocumentPositionParams)
 	pos := lspPositionToIdx(document.code, params.Position)
 
 	p := np.Find(document.parseTree.Root, pos)
-	// Try variable doc
 	var primary *parse.Primary
 	if p.Match(np.Store(&primary)) && primary.Type == parse.Variable {
 		// TODO: Take shadowing into consideration.
-		markdown, err := doc.Source("$" + primary.Value)
-		if err == nil {
+		name := "$" + primary.Value
+		if base, ok := functionVarBase(normalizeVarName(primary.Value)); ok {
+			name = base
+		}
+		if markdown, err := doc.Source(name); err == nil {
 			r := lspRangeFromRange(document.code, primary)
 			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
 		}
 	}
-	// Try command doc
 	var expr np.SimpleExprData
 	var form *parse.Form
 	if p.Match(np.SimpleExpr(&expr, nil), np.Store(&form)) && form.Head == expr.Compound {
 		// TODO: Take shadowing into consideration.
-		markdown, err := doc.Source(expr.Value)
-		if err == nil {
+		if markdown, err := doc.Source(expr.Value); err == nil {
 			r := lspRangeFromRange(document.code, expr.Compound)
 			return lsp.Hover{Contents: lsp.MarkupContent{Kind: lsp.MKMarkdown, Value: markdown}, Range: &r}, nil
 		}
