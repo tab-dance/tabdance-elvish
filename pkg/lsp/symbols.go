@@ -93,25 +93,6 @@ func parseStringLiteral(n *parse.Compound) (string, bool) {
 	}
 }
 
-func enclosingFnName(n parse.Node) string {
-	for cur := parse.Parent(n); cur != nil; cur = parse.Parent(cur) {
-		form, ok := cur.(*parse.Form)
-		if !ok {
-			continue
-		}
-		head, ok := parseStringLiteral(form.Head)
-		if !ok || head != "fn" || len(form.Args) < 1 {
-			continue
-		}
-		name, ok := parseStringLiteral(form.Args[0])
-		if !ok {
-			continue
-		}
-		return name
-	}
-	return ""
-}
-
 func renameTarget(root parse.Node, pos int) (symbolRef, bool) {
 	sym, ok := symbolAt(root, pos)
 	if !ok {
