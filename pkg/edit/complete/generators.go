@@ -35,7 +35,17 @@ func GenerateDirNames(args []string) ([]RawItem, error) {
 	if len(args) == 0 {
 		return nil, nil
 	}
-	return generateFileNames(args[len(args)-1], fs.FileInfo.IsDir)
+	seed := args[len(args)-1]
+	return generateFileNames(seed, func(fi fs.FileInfo, full string) bool {
+		if fi.IsDir() {
+			return true
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			return false
+		}
+		info, err := os.Stat(full)
+		return err == nil && info.IsDir()
+	})
 }
 
 // GenerateForSudo generates candidates for sudo.
@@ -152,7 +162,7 @@ func generateCommands(seed string, ev *eval.Evaler, p np.Path) ([]RawItem, error
 	return cands, nil
 }
 
-func generateFileNames(seed string, statPred func(fs.FileInfo) bool) ([]RawItem, error) {
+func generateFileNames(seed string, statPred func(fs.FileInfo, string) bool) ([]RawItem, error) {
 	var items []RawItem
 
 	dir, fileprefix := filepath.Split(seed)
@@ -180,13 +190,13 @@ func generateFileNames(seed string, statPred func(fs.FileInfo) bool) ([]RawItem,
 		if dotfile(fileprefix) != dotfile(name) {
 			continue
 		}
-		// Apply statPred if given.
-		if statPred != nil && !statPred(stat) {
-			continue
-		}
-
 		// Full filename for source and getStyle.
 		full := dir + name
+
+		// Apply statPred if given.
+		if statPred != nil && !statPred(stat, full) {
+			continue
+		}
 
 		// Will be set to an empty space for non-directories
 		suffix := " "
@@ -212,8 +222,15 @@ func generateFileNames(seed string, statPred func(fs.FileInfo) bool) ([]RawItem,
 	return items, nil
 }
 
-func executableOrDir(stat fs.FileInfo) bool {
-	return fsutil.IsExecutable(stat) || stat.IsDir()
+func executableOrDir(stat fs.FileInfo, full string) bool {
+	if fsutil.IsExecutable(stat) || stat.IsDir() {
+		return true
+	}
+	if stat.Mode()&os.ModeSymlink != 0 {
+		info, err := os.Stat(full)
+		return err == nil && info.IsDir()
+	}
+	return false
 }
 
 func generateIndices(v any) []RawItem {

@@ -5,6 +5,7 @@ package complete
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -461,3 +462,34 @@ func fci(s, suffix string) modes.CompletionItem {
 }
 
 func r(i, j int) diag.Ranging { return diag.Ranging{From: i, To: j} }
+
+func TestGenerateDirNames_IncludesSymlinkedDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require special permissions on Windows")
+	}
+	lscolors.SetTestLsColors(t)
+	testutil.InTempDir(t)
+	testutil.ApplyDir(testutil.Dir{
+		"real": testutil.Dir{},
+		"file": "",
+	})
+	if err := os.Symlink("real", "linkdir"); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := os.Symlink("missing", "broken"); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	items, err := GenerateDirNames([]string{""})
+	if err != nil {
+		t.Fatalf("GenerateDirNames: %v", err)
+	}
+	var got []string
+	for _, item := range items {
+		got = append(got, item.String())
+	}
+	want := []string{"linkdir" + string(os.PathSeparator), "real" + string(os.PathSeparator)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
