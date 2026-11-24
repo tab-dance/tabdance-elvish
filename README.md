@@ -14,7 +14,8 @@ aimed at external completion tools such as
     introspection (aliases, builtins, functions, variables).
 
 -   `pkg/lsp` language server: definition, references, document and workspace
-    symbols, rename, hover, and document highlight for Elvish code.
+    symbols, rename, hover, document highlight, and document/range formatting
+    for Elvish code.
 
 ## Building
 
