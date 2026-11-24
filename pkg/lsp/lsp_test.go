@@ -743,6 +743,14 @@ var jsonrpcErrorTests = []struct {
 		lsp.DocumentSymbolParams{
 			TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}},
 		unknownDocument("file://unknown")},
+	{"unknown document to formatting", "textDocument/formatting",
+		lsp.DocumentFormattingParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}},
+		unknownDocument("file://unknown")},
+	{"unknown document to rangeFormatting", "textDocument/rangeFormatting",
+		lsp.DocumentRangeFormattingParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: "file://unknown"}},
+		unknownDocument("file://unknown")},
 }
 
 func TestJSONRPCErrors(t *testing.T) {
@@ -936,6 +944,114 @@ func TestHoverShadowedVariableUsesResolvedBinding(t *testing.T) {
 	}
 	if got.Contents.Value != "" {
 		t.Fatalf("got hover %+v, want empty for shadowed local", got)
+	}
+}
+
+func TestFormatting(t *testing.T) {
+	f := setup(t)
+	text := "echo  x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	checkDiag(t, f, diagParam([]lsp.Diagnostic{}))
+
+	var edits []lsp.TextEdit
+	err := f.conn.Call(bgCtx, "textDocument/formatting", lsp.DocumentFormattingParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Options:      lsp.FormattingOptions{},
+	}, &edits)
+	if err != nil {
+		t.Fatalf("formatting: %v", err)
+	}
+	want := []lsp.TextEdit{{
+		Range: lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 0},
+			End:   lsp.Position{Line: 1, Character: 0},
+		},
+		NewText: "echo x\n",
+	}}
+	if diff := cmp.Diff(want, edits); diff != "" {
+		t.Errorf("(-want +got):\n%s", diff)
+	}
+}
+
+func TestFormattingNoop(t *testing.T) {
+	f := setup(t)
+	text := "echo x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	checkDiag(t, f, diagParam([]lsp.Diagnostic{}))
+
+	var edits []lsp.TextEdit
+	err := f.conn.Call(bgCtx, "textDocument/formatting", lsp.DocumentFormattingParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	}, &edits)
+	if err != nil {
+		t.Fatalf("formatting: %v", err)
+	}
+	if len(edits) != 0 {
+		t.Fatalf("got %d edits, want 0: %+v", len(edits), edits)
+	}
+}
+
+func TestFormattingParseError(t *testing.T) {
+	f := setup(t)
+	text := "if {\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	// Drain diagnostics published for parse error.
+	select {
+	case <-f.diags:
+	case <-time.After(testutil.Scaled(time.Second)):
+		t.Fatalf("timed out waiting for diagnostics")
+	}
+
+	var edits []lsp.TextEdit
+	err := f.conn.Call(bgCtx, "textDocument/formatting", lsp.DocumentFormattingParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+	}, &edits)
+	if err != nil {
+		t.Fatalf("formatting: %v", err)
+	}
+	if len(edits) != 0 {
+		t.Fatalf("got %d edits, want 0: %+v", len(edits), edits)
+	}
+}
+
+func TestRangeFormatting(t *testing.T) {
+	f := setup(t)
+	text := "echo  x\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	checkDiag(t, f, diagParam([]lsp.Diagnostic{}))
+
+	var edits []lsp.TextEdit
+	err := f.conn.Call(bgCtx, "textDocument/rangeFormatting", lsp.DocumentRangeFormattingParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Range:        lsp.Range{Start: lsp.Position{Line: 0, Character: 4}, End: lsp.Position{Line: 0, Character: 7}},
+	}, &edits)
+	if err != nil {
+		t.Fatalf("rangeFormatting: %v", err)
+	}
+	if len(edits) != 1 {
+		t.Fatalf("got %d edits, want 1: %+v", len(edits), edits)
+	}
+	if edits[0].NewText != "echo x\n" {
+		t.Fatalf("NewText = %q", edits[0].NewText)
+	}
+}
+
+func TestRangeFormattingNoopOutsideChange(t *testing.T) {
+	f := setup(t)
+	text := "echo  x\necho y\n"
+	f.conn.Notify(bgCtx, "textDocument/didOpen", didOpenParams(text))
+	checkDiag(t, f, diagParam([]lsp.Diagnostic{}))
+
+	var edits []lsp.TextEdit
+	err := f.conn.Call(bgCtx, "textDocument/rangeFormatting", lsp.DocumentRangeFormattingParams{
+		TextDocument: lsp.TextDocumentIdentifier{URI: testURI},
+		Range:        lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 1, Character: 6}},
+	}, &edits)
+	if err != nil {
+		t.Fatalf("rangeFormatting: %v", err)
+	}
+	if len(edits) != 0 {
+		t.Fatalf("got %d edits, want 0: %+v", len(edits), edits)
 	}
 }
 

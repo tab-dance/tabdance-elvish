@@ -12,6 +12,7 @@ import (
 	"src.elv.sh/pkg/diag"
 	"src.elv.sh/pkg/edit/complete"
 	"src.elv.sh/pkg/eval"
+	"src.elv.sh/pkg/format"
 	"src.elv.sh/pkg/mods/doc"
 	"src.elv.sh/pkg/parse"
 	"src.elv.sh/pkg/parse/np"
@@ -128,6 +129,8 @@ func handler(s *server) jsonrpc2.Handler {
 
 		// Called by clients even when server doesn't advertise support:
 		// https://microsoft.github.io/language-server-protocol/specification#workspace_didChangeWatchedFiles
+		"textDocument/formatting":         convertMethod(s.formatting),
+		"textDocument/rangeFormatting":    convertMethod(s.rangeFormatting),
 		"workspace/didChangeWatchedFiles": noop,
 	})
 }
@@ -145,14 +148,16 @@ func (s *server) initialize(_ context.Context, _ json.RawMessage) (any, error) {
 				OpenClose: true,
 				Change:    lsp.TDSyncKindFull,
 			},
-			CompletionProvider:        &lsp.CompletionOptions{},
-			HoverProvider:             &lsp.HoverOptions{},
-			DefinitionProvider:        &lsp.DefinitionRegistrationOptions{},
-			ReferencesProvider:        &lsp.ReferenceRegistrationOptions{},
-			DocumentSymbolProvider:    &lsp.DocumentSymbolRegistrationOptions{},
-			WorkspaceSymbolProvider:   &lsp.WorkspaceSymbolRegistrationOptions{},
-			RenameProvider:            &lsp.RenameRegistrationOptions{RenameOptions: lsp.RenameOptions{PrepareProvider: true}},
-			DocumentHighlightProvider: &lsp.DocumentHighlightRegistrationOptions{},
+			CompletionProvider:              &lsp.CompletionOptions{},
+			HoverProvider:                   &lsp.HoverOptions{},
+			DefinitionProvider:              &lsp.DefinitionRegistrationOptions{},
+			ReferencesProvider:              &lsp.ReferenceRegistrationOptions{},
+			DocumentSymbolProvider:          &lsp.DocumentSymbolRegistrationOptions{},
+			WorkspaceSymbolProvider:         &lsp.WorkspaceSymbolRegistrationOptions{},
+			RenameProvider:                  &lsp.RenameRegistrationOptions{RenameOptions: lsp.RenameOptions{PrepareProvider: true}},
+			DocumentHighlightProvider:       &lsp.DocumentHighlightRegistrationOptions{},
+			DocumentFormattingProvider:      &lsp.DocumentFormattingRegistrationOptions{},
+			DocumentRangeFormattingProvider: &lsp.DocumentRangeFormattingRegistrationOptions{},
 		},
 		ServerInfo: lsp.ServerInfo{Name: "elvish"},
 	}, nil
@@ -176,6 +181,100 @@ func (s *server) didChange(ctx context.Context, params lsp.DidChangeTextDocument
 	uri, content := params.TextDocument.URI, params.ContentChanges[0].Text
 	s.updateDocument(conn(ctx), uri, params.TextDocument.Version, content)
 	return nil, nil
+}
+
+func (s *server) formatting(_ context.Context, params lsp.DocumentFormattingParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	doc, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+
+	formatted, err := formatSource(doc.code, params.Options)
+	if err != nil || formatted == doc.code {
+		return []lsp.TextEdit{}, nil
+	}
+	return []lsp.TextEdit{{
+		Range:   lspRangeFromRange(doc.code, diag.Ranging{From: 0, To: len(doc.code)}),
+		NewText: formatted,
+	}}, nil
+}
+
+func (s *server) rangeFormatting(_ context.Context, params lsp.DocumentRangeFormattingParams) (any, error) {
+	uri := params.TextDocument.URI
+	s.mu.Lock()
+	doc, ok := s.documents[uri]
+	s.mu.Unlock()
+	if !ok {
+		return nil, unknownDocument(uri)
+	}
+
+	formatted, err := formatSource(doc.code, params.Options)
+	if err != nil || formatted == doc.code {
+		return []lsp.TextEdit{}, nil
+	}
+
+	// Whole-document formatter MVP: return a full-document edit only when the
+	// requested range intersects changed text. This keeps range formatting safe
+	// and simple while whole-file normalization is the canonical behavior.
+	start := lspPositionToIdx(doc.code, params.Range.Start)
+	end := lspPositionToIdx(doc.code, params.Range.End)
+	if end < start {
+		start, end = end, start
+	}
+	if !intersectsChange(doc.code, formatted, start, end) {
+		return []lsp.TextEdit{}, nil
+	}
+	return []lsp.TextEdit{{
+		Range:   lspRangeFromRange(doc.code, diag.Ranging{From: 0, To: len(doc.code)}),
+		NewText: formatted,
+	}}, nil
+}
+
+func formatSource(code string, options lsp.FormattingOptions) (string, error) {
+	opts := format.Options{
+		TabSize:                options.TabSize,
+		InsertSpaces:           options.InsertSpaces,
+		TrimTrailingWhitespace: options.TrimTrailingWhitespace,
+		InsertFinalNewline:     options.InsertFinalNewline,
+		TrimFinalNewlines:      options.TrimFinalNewlines,
+	}
+	return format.Source(code, opts)
+}
+
+func intersectsChange(old, new string, start, end int) bool {
+	if old == new {
+		return false
+	}
+	prefix := commonPrefixLen(old, new)
+	oldSuffixStart := len(old) - commonSuffixLen(old[prefix:], new[prefix:])
+	if oldSuffixStart < prefix {
+		oldSuffixStart = prefix
+	}
+	return start < oldSuffixStart && end > prefix
+}
+
+func commonPrefixLen(a, b string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+func commonSuffixLen(a, b string) int {
+	i := 0
+	na, nb := len(a), len(b)
+	for i < na && i < nb && a[na-1-i] == b[nb-1-i] {
+		i++
+	}
+	return i
 }
 
 func (s *server) didClose(ctx context.Context, params lsp.DidCloseTextDocumentParams) (any, error) {
