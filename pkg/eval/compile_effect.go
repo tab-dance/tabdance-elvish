@@ -118,10 +118,14 @@ func (op *pipelineOp) exec(fm *Frame) Exception {
 				// Store in input port for ease of retrieval later
 				sendStop: sendStop, sendError: sendError, readerGone: readerGone}
 		}
+		persist := nforms == 1 && !op.bg
 		f := func(formOp effectOp, pexc *Exception) {
 			exc := formOp.exec(newFm)
 			if exc != nil && exc.Reason() != nil && !(outputIsPipe && isReaderGone(exc)) {
 				*pexc = exc
+			}
+			if persist && newFm.persistExecRedirs {
+				newFm.movePortsTo(fm)
 			}
 			if pipeIn != nil {
 				*pipeIn.sendError = errs.ReaderGone{}

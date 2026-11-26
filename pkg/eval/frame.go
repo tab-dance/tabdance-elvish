@@ -44,6 +44,10 @@ type Frame struct {
 	traceback *StackTrace
 
 	background bool
+
+	// Set by exec with no command arguments to request that file redirections
+	// applied to this frame persist in the calling frame.
+	persistExecRedirs bool
 }
 
 // PrepareEval prepares a piece of code for evaluation in a copy of the current
@@ -75,7 +79,7 @@ func (fm *Frame) prepareEval(src parse.Source, r diag.Ranger, ns, evalNs *Ns) (*
 		traceback = fm.addTraceback(r)
 	}
 	newFm := &Frame{
-		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background}
+		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background, false}
 	op, _, err := compile(fm.Evaler.Builtin().static(), local.static(), nil, tree, fm.ErrorFile())
 	if err != nil {
 		return nil, nil, err
@@ -212,7 +216,7 @@ func (fm *Frame) Fork() *Frame {
 		fm.Evaler, fm.src,
 		fm.local, fm.up, fm.evalNs, fm.defers,
 		fm.ctx, newPorts,
-		fm.traceback, fm.background,
+		fm.traceback, fm.background, false,
 	}
 }
 
@@ -221,6 +225,17 @@ func (fm *Frame) forkWithOutput(p *Port) *Frame {
 	newFm := fm.Fork()
 	newFm.ports[1] = p
 	return newFm
+}
+
+func (fm *Frame) movePortsTo(dst *Frame) {
+	growPorts(&dst.ports, len(fm.ports))
+	for i, p := range fm.ports {
+		if dst.ports[i] != p {
+			dst.ports[i].close()
+			dst.ports[i] = p
+			fm.ports[i] = nil
+		}
+	}
 }
 
 // CaptureOutput captures the output of a given callback that operates on a Frame.
