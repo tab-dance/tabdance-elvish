@@ -34,9 +34,11 @@ fn has-external {|command| }
 # See also [`external`]() and [`has-external`]().
 fn search-external {|command| }
 
-# Replace the Elvish process with an external `$command`, defaulting to
-# `elvish`, passing the given arguments. This decrements `$E:SHLVL` before
-# starting the new process.
+# Replace the Elvish process with an external `$command`, passing the given
+# arguments. This decrements `$E:SHLVL` before starting the new process.
+#
+# If no `$command` is given, `exec` applies any file redirections to the
+# current Elvish process, affecting subsequent commands.
 #
 # This command always raises an exception on Windows with the message "not
 # supported on Windows".

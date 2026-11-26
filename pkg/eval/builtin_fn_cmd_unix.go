@@ -4,6 +4,7 @@ package eval
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"sort"
@@ -35,14 +36,17 @@ var (
 var execApplyRedirs = defaultApplyExecRedirs
 
 func execFn(fm *Frame, args ...any) error {
-	var argstrings []string
 	if len(args) == 0 {
-		argstrings = []string{"elvish"}
-	} else {
-		argstrings = make([]string, len(args))
-		for i, a := range args {
-			argstrings[i] = vals.ToString(a)
+		if fm.background {
+			return fmt.Errorf("exec with no command does not support background execution")
 		}
+		fm.persistExecRedirs = true
+		return nil
+	}
+
+	argstrings := make([]string, len(args))
+	for i, a := range args {
+		argstrings[i] = vals.ToString(a)
 	}
 
 	var err error

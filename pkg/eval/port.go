@@ -56,9 +56,11 @@ func (p *Port) close() {
 		return
 	}
 	if p.closeFile {
+		p.closeFile = false
 		p.File.Close()
 	}
 	if p.closeChan {
+		p.closeChan = false
 		close(p.Chan)
 	}
 }

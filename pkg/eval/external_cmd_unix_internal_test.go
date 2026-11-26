@@ -50,8 +50,8 @@ func TestExec_Argv0Argv(t *testing.T) {
 		{
 			name:      "no command",
 			code:      "exec",
-			wantArgv0: dir + "/bin/elvish",
-			wantArgv:  []string{dir + "/bin/elvish"},
+			wantArgv0: "",
+			wantArgv:  nil,
 		},
 		{
 			name:      "bad command",
@@ -305,5 +305,39 @@ func TestExec_RestoresStateOnApplyFailure(t *testing.T) {
 	}
 	if len(destData) != 0 {
 		t.Fatalf("dest should be untouched after rollback, got %q", string(destData))
+	}
+}
+
+func TestExec_NoCommandAppliesRedirectionsToScript(t *testing.T) {
+	if os.Getenv("ELVISH_EXEC_NOCMD_REDIR_HELPER") == "1" {
+		out := os.Getenv("ELVISH_EXEC_NOCMD_REDIR_OUT")
+		code := "exec > " + parse.Quote(out) + " 2>&1; echo hi"
+		ev := NewEvaler()
+		_ = ev.Eval(parse.Source{Name: "[test]", Code: code}, EvalCfg{})
+		return
+	}
+
+	dir := testutil.InTempDir(t)
+	outFile := filepath.Join(dir, "out.txt")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestExec_NoCommandAppliesRedirectionsToScript$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		"ELVISH_EXEC_NOCMD_REDIR_HELPER=1",
+		"ELVISH_EXEC_NOCMD_REDIR_OUT="+outFile,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("reading redirected output: %v\nhelper output:\n%s", err, output)
+	}
+	if got := string(data); got != "hi\n" {
+		t.Fatalf("redirected output = %q, want %q\nhelper output:\n%s", got, "hi\n", output)
 	}
 }

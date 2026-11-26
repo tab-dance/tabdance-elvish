@@ -39,6 +39,18 @@ Exception: exit 3
 Exception: arity mismatch: arguments must be 0 to 1 values, but is 2 values
   [tty]:1:1-8: exit 1 2
 
+////////
+# exec #
+////////
+
+//only-on unix
+
+## no command applies redirections to remaining script ##
+//in-temp-dir
+~> exec > out.txt 2>&1; echo hi
+~> slurp < out.txt
+▶ "hi\n"
+
 /////////////////////
 # external commands #
 /////////////////////
