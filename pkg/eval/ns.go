@@ -40,6 +40,9 @@ type Nser interface {
 }
 
 // Static information known about a variable.
+//
+// Fork semantics for declaration rollback and namespace publication are
+// documented in AGENTS.md ("Fork semantics / divergences").
 type staticVarInfo struct {
 	name     string
 	readOnly bool

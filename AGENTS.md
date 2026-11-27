@@ -219,6 +219,48 @@ This fork adds on top of upstream Elvish:
     ops cannot race the rollback. Tests: `pkg/eval/rollback_test.go`,
     transcripts in `pkg/eval/builtin_special_test.elvts`.
 
+    -   **Fork semantics / divergences** (see also `staticVarInfo` in
+        `pkg/eval/ns.go`):
+
+        1.  **Unexecuted-branch declarations**: at top level, `nsOp.prepare`
+            publishes appended chunk entries as visible before their
+            declaration op runs (`hidden=false, activated=false`), so
+            `if $false { var w = 1 }` leaves `$w` as a visible nil variable for
+            upstream compatibility. Inside closures/functions, locals are
+            installed by `Closure.Call` from compiled `newLocal` metadata and
+            stay hidden until their declaration op executes; the two contexts
+            behave differently.
+
+        2.  **Nested default-global `Eval` re-publication**: default-global
+            `Eval` publishes `ev.global = newLocal` before executing; a nested
+            default-global `Eval` on the same transaction publishes its own
+            `newLocal`, replacing `ev.global` while the outer frame still
+            executes on its old `fm.local`. Declarations made by the outer
+            chunk after the nested eval may execute but not be visible through
+            `Evaler.Global()`/`GlobalSnapshot()` (variable objects remain
+            shared where present). This follows upstream's publication model.
+
+        3.  **`del` in async pipeline forms**: pipeline forms dispatched to
+            another goroutine get a private namespace metadata copy
+            (`fm.local.clone()` in `pkg/eval/compile_effect.go`); variable
+            objects are shared, but `del` mutates metadata/slot arrays on that
+            private copy, so `del x &` does not nil the shared slot. Upstream
+            nil'd it racily.
+
+        4.  **Background declarations on chunk failure**: declarations
+            executed by background/other-goroutine pipeline forms are activated
+            on the form's private metadata copy, so the main chunk rollback
+            cannot see them and rolls them back when the chunk fails.
+            Deterministic, and arguably better than upstream's racy leak, but
+            different.
+
+        5.  **Redeclaration growth**: redeclaring a name shadows the old entry
+            and appends a new one (`staticNs.addWith`); `Ns.withoutTombstones`
+            sweeps only rollback tombstones (`hidden && deleted &&
+            !activated`), not redeclaration shadow entries, because old bindings
+            may still be captured by closures. Namespace layout can still grow
+            with redeclarations; only rollback tombstones are swept.
+
 -   **Default-global concurrency contract**: default-global `Eval`,
     `ExtendGlobal`, `DeleteFromGlobal`, `CallInDefaultGlobal` and the readers
     `GlobalSnapshot`/`GlobalVar` serialize on a reentrant transaction
