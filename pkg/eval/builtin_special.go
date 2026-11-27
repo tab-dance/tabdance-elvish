@@ -849,8 +849,8 @@ func (op *forOp) exec(fm *Frame) Exception {
 	local := fm.local
 	if op.newLocal != nil {
 		local = &Ns{
-			make([]vars.Var, len(op.newLocal)),
-			append([]staticVarInfo(nil), op.newLocal...)}
+			slots: make([]vars.Var, len(op.newLocal)),
+			infos: append([]staticVarInfo(nil), op.newLocal...)}
 		for i, info := range op.newLocal {
 			local.slots[i] = MakeVarFromName(info.name)
 		}
@@ -860,8 +860,8 @@ func (op *forOp) exec(fm *Frame) Exception {
 	loopFm.local = local
 	if op.capture != nil {
 		capture := &Ns{
-			make([]vars.Var, len(op.capture.infos)),
-			make([]staticVarInfo, len(op.capture.infos))}
+			slots: make([]vars.Var, len(op.capture.infos)),
+			infos: make([]staticVarInfo, len(op.capture.infos))}
 		for i, info := range op.capture.infos {
 			if info.local {
 				capture.slots[i] = fm.local.slots[info.index]

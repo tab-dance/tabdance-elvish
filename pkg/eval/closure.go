@@ -101,7 +101,7 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 
 	// Populate local scope with arguments, options, and newly created locals.
 	localSize := len(c.ArgNames) + len(c.OptNames) + len(c.newLocal)
-	local := &Ns{make([]vars.Var, localSize), make([]staticVarInfo, localSize)}
+	local := &Ns{slots: make([]vars.Var, localSize), infos: make([]staticVarInfo, localSize)}
 
 	for i, name := range c.ArgNames {
 		local.infos[i] = staticVarInfo{name, false, false, false, false, false}

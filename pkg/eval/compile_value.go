@@ -474,8 +474,8 @@ type lambdaOp struct {
 
 func (op *lambdaOp) exec(fm *Frame) ([]any, Exception) {
 	capture := &Ns{
-		make([]vars.Var, len(op.capture.infos)),
-		make([]staticVarInfo, len(op.capture.infos))}
+		slots: make([]vars.Var, len(op.capture.infos)),
+		infos: make([]staticVarInfo, len(op.capture.infos))}
 	for i, info := range op.capture.infos {
 		if info.local {
 			capture.slots[i] = fm.local.slots[info.index]

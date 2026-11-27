@@ -176,31 +176,40 @@ func (ev *Evaler) lockGlobalEval() {
 	ev.globalEvalMu.Unlock()
 }
 
-// sameGoroutineAsOwner reports whether the calling goroutine is the one
-// recorded as the owner of the active transaction. It must be called with
-// globalEvalMu held, while a transaction is active.
-//
-// The owner is recorded once per long-running transaction by
-// noteGlobalEvalOwner. While the owner is not recorded — which only happens
-// for short sections that run no code which could reenter — every caller is
-// conservatively treated as a different goroutine and blocks.
-func (ev *Evaler) sameGoroutineAsOwner() bool {
-	return ev.globalEvalOwnerKnown &&
-		ev.globalEvalOwnerID == currentGoroutineID()
-}
-
-// noteGlobalEvalOwner records the calling goroutine as the owner of the
-// current transaction, allowing reentrant acquisition from code that runs
-// during it, such as chdir hooks or Go functions calling back into the
-// Evaler. Long-running holders (Eval, CallInDefaultGlobal) must call it
-// immediately after acquiring the transaction, before running any code.
-func (ev *Evaler) noteGlobalEvalOwner() {
+// lockGlobalEvalTxn acquires the transaction for a long-running section that
+// executes code which may reenter - user code, hooks, Go functions calling
+// back into the Evaler - recording the caller as the owner so that nested
+// acquisitions on the same goroutine reenter instead of blocking. Short
+// sections that run no such code use lockGlobalEval and stay free of
+// goroutine-identity work.
+func (ev *Evaler) lockGlobalEvalTxn() {
 	ev.globalEvalMu.Lock()
+	for ev.globalEvalDepth > 0 && !ev.sameGoroutineAsOwner() {
+		if ev.globalEvalCond == nil {
+			ev.globalEvalCond = sync.NewCond(&ev.globalEvalMu)
+		}
+		ev.globalEvalCond.Wait()
+	}
 	if !ev.globalEvalOwnerKnown {
 		ev.globalEvalOwnerID = currentGoroutineID()
 		ev.globalEvalOwnerKnown = true
 	}
+	ev.globalEvalDepth++
 	ev.globalEvalMu.Unlock()
+}
+
+// sameGoroutineAsOwner reports whether the calling goroutine is the one
+// recorded as the owner of the active transaction. It must be called with
+// globalEvalMu held, while a transaction is active.
+//
+// The owner is recorded once per long-running transaction, when it acquires
+// the transaction via lockGlobalEvalTxn. While the owner is not recorded -
+// which only happens for short sections that run no code which could
+// reenter - every caller is conservatively treated as a different goroutine
+// and blocks.
+func (ev *Evaler) sameGoroutineAsOwner() bool {
+	return ev.globalEvalOwnerKnown &&
+		ev.globalEvalOwnerID == currentGoroutineID()
 }
 
 func (ev *Evaler) unlockGlobalEval() {
@@ -496,9 +505,8 @@ func (ev *Evaler) Eval(src parse.Source, cfg EvalCfg) error {
 
 	defaultGlobal := cfg.Global == nil
 	if defaultGlobal {
-		ev.lockGlobalEval()
+		ev.lockGlobalEvalTxn()
 		defer ev.unlockGlobalEval()
-		ev.noteGlobalEvalOwner()
 	}
 	ev.mu.RLock()
 	b := ev.builtin
@@ -582,9 +590,8 @@ func (ev *Evaler) Call(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
 func (ev *Evaler) CallInDefaultGlobal(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
 	callCfg.fillDefaults()
 	evalCfg.fillDefaults()
-	ev.lockGlobalEval()
+	ev.lockGlobalEvalTxn()
 	defer ev.unlockGlobalEval()
-	ev.noteGlobalEvalOwner()
 	evalCfg.Global = ev.global
 	fm, cleanup := ev.prepareFrame(parse.Source{Name: callCfg.From}, evalCfg)
 	defer cleanup()

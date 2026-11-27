@@ -2,6 +2,7 @@ package eval
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 
 	"src.elv.sh/pkg/eval/vars"
@@ -122,4 +123,67 @@ func BenchmarkGlobalVar(b *testing.B) {
 			_ = ev.GlobalVar("v500")
 		}
 	})
+}
+
+// BenchmarkEvalDefaultGlobalReadOnly measures a chunk that doesn't change the
+// namespace layout on a large global; such chunks take the no-copy fast path
+// in nsOp.prepare, so regressions here mean the fast path stopped engaging.
+func BenchmarkEvalDefaultGlobalReadOnly(b *testing.B) {
+	ev := NewEvaler()
+	nb := BuildNs()
+	for i := 0; i < 1000; i++ {
+		nb.AddVar(fmt.Sprintf("v%d", i), vars.FromInit(nil))
+	}
+	ev.ExtendGlobal(nb.Ns())
+	src := parse.Source{Name: "[benchmark]", Code: "set v0 = 1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := ev.Eval(src, EvalCfg{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkEvalReentrantLockAtDepth measures the cost of reentrant
+// transaction acquisition from deep Elvish call stacks: a Go function called
+// at the bottom of a recursive Elvish function probes the transaction from
+// inside a running default-global Eval. The mode runs isolate the costs:
+// "control" does no probe, "idonly" computes the goroutine identity alone
+// (the runtime.Stack parse that reentrancy detection needs), and "snapshot"
+// takes the reentrant reader lock like a chdir hook would. The growth of
+// idonly/snapshot over control with depth is the baseline for
+// https://github.com/tab-dance/tabdance-elvish/issues/57.
+var (
+	benchSnapshotSink    *Ns
+	benchGoroutineIDSink uint64
+)
+
+func BenchmarkEvalReentrantLockAtDepth(b *testing.B) {
+	for _, mode := range []string{"control", "idonly", "snapshot"} {
+		ev := NewEvaler()
+		ev.ExtendGlobal(BuildNs().AddGoFn("reenter", func() {
+			switch mode {
+			case "idonly":
+				benchGoroutineIDSink = currentGoroutineID()
+			case "snapshot":
+				benchSnapshotSink = ev.GlobalSnapshot()
+			}
+		}).Ns())
+		if err := ev.Eval(parse.Source{Name: "[benchmark]", Code: `fn rec {|n|
+			if (> $n 0) { rec (- $n 1) } else { reenter }
+		}`}, EvalCfg{}); err != nil {
+			b.Fatal(err)
+		}
+		for _, depth := range []int{1, 10, 100} {
+			b.Run(fmt.Sprintf("%v/depth-%v", mode, depth), func(b *testing.B) {
+				src := parse.Source{Name: "[benchmark]", Code: "rec " + strconv.Itoa(depth)}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := ev.Eval(src, EvalCfg{}); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
 }
