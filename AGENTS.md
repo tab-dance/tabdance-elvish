@@ -223,11 +223,15 @@ This fork adds on top of upstream Elvish:
     `ExtendGlobal`, `DeleteFromGlobal`, `CallInDefaultGlobal` and the readers
     `GlobalSnapshot`/`GlobalVar` serialize on a reentrant transaction
     (`globalEvalMu`; see the contract comment on `Evaler` in
-    `pkg/eval/eval.go`). Goroutine identity is parsed from `runtime.Stack` only
-    while a transaction is active, so uncontended paths stay cheap. Use
-    `GlobalVar` for point lookups (highlighting, completion) and
-    `GlobalSnapshot` only when iterating. `Evaler.Global()` returns the live
-    namespace; its metadata mutates during a default-global eval.
+    `pkg/eval/eval.go`). Frames created during a transaction cache the owner's
+    goroutine identity (`Frame.goid`), and the chdir hook chain (`cd` -> `chdir`
+    -> `callHookGoid` -> `callGoid` -> `globalSnapshotGoid`) reenters through
+    it, so nested acquisitions on in-tree paths never parse `runtime.Stack`
+    (#57); that lookup remains only as the frame-less fallback and the
+    once-per-transaction owner note. Use `GlobalVar` for point lookups
+    (highlighting, completion) and `GlobalSnapshot` only when iterating.
+    `Evaler.Global()` returns the live namespace; its metadata mutates during a
+    default-global eval.
 
 -   **Command completer**: `$edit:completion:command-completer` (a function) is
     called with the seed (partial command name) and should output candidates;

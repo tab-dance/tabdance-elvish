@@ -25,6 +25,14 @@ import (
 // need serialized observation should use CallInDefaultGlobal explicitly and
 // ensure callbacks cannot block on globalEvalMu.
 func CallHook(ev *Evaler, evalCfg *EvalCfg, name string, hook vals.List, args ...any) {
+	callHookGoid(ev, 0, evalCfg, name, hook, args...)
+}
+
+// callHookGoid is like CallHook, with goid being the cached goroutine identity
+// of the frame the hook run was triggered from (0 for unknown), so that hook
+// functions reenter a running default-global transaction without a
+// goroutine-ID lookup, whose cost grows with stack depth.
+func callHookGoid(ev *Evaler, goid uint64, evalCfg *EvalCfg, name string, hook vals.List, args ...any) {
 	if hook.Len() == 0 {
 		return
 	}
@@ -47,7 +55,7 @@ func CallHook(ev *Evaler, evalCfg *EvalCfg, name string, hook vals.List, args ..
 			continue
 		}
 
-		err := ev.Call(fn, callCfg, *evalCfg)
+		err := ev.callGoid(goid, fn, callCfg, *evalCfg)
 		if err != nil {
 			diag.ShowError(stderr, err)
 		}

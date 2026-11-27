@@ -57,6 +57,14 @@ type Frame struct {
 	// Namespace metadata of the entries below rollbackBoundary before the
 	// current chunk started; rollback restores them from here.
 	rollbackOrig []staticVarInfo
+
+	// Identity of the goroutine this frame was created on; 0 when unknown.
+	// It lets reentrant acquisitions of the default-global transaction from
+	// code running on this frame recognize the transaction's owner without a
+	// runtime.Stack goroutine-ID lookup, whose cost grows with stack depth.
+	// Forks inherit it (they run on the same goroutine); frames dispatched to
+	// pipeline goroutines must clear it, since they execute elsewhere.
+	goid uint64
 }
 
 // PrepareEval prepares a piece of code for evaluation in a copy of the current
@@ -92,7 +100,7 @@ func (fm *Frame) prepareEval(src parse.Source, r diag.Ranger, ns, evalNs *Ns) (*
 		traceback = fm.addTraceback(r)
 	}
 	newFm := &Frame{
-		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background, false, 0, nil}
+		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background, false, 0, nil, fm.goid}
 	op, _, err := compile(fm.Evaler.Builtin().static(), local.static(), nil, tree, fm.ErrorFile())
 	if err != nil {
 		return nil, nil, err
@@ -230,7 +238,7 @@ func (fm *Frame) Fork() *Frame {
 		fm.local, fm.up, fm.evalNs, fm.defers,
 		fm.ctx, newPorts,
 		fm.traceback, fm.background, false,
-		fm.rollbackBoundary, fm.rollbackOrig,
+		fm.rollbackBoundary, fm.rollbackOrig, fm.goid,
 	}
 }
 

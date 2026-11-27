@@ -48,8 +48,12 @@ type Evaler struct {
 	// Hooks to run before exit or exec.
 	PreExitHooks []func()
 	preExitOnce  sync.Once
-	// Chdir hooks, exposed indirectly as $before-chdir and $after-chdir.
+	// Go hooks to run around a directory change. The Elvish $before-chdir
+	// and $after-chdir hook lists are run separately, by chdir itself, so
+	// that they can reenter the calling frame's transaction cheaply.
 	BeforeChdir, AfterChdir []func(string)
+	// The Elvish $before-chdir and $after-chdir hook lists.
+	beforeChdirElvish, afterChdirElvish vars.PtrVar
 	// Directories to search libraries.
 	LibDirs []string
 	// Source code of internal bundled modules indexed by use specs.
@@ -164,9 +168,22 @@ func currentGoroutineID() uint64 {
 	return id
 }
 
+// goroutineID is the goroutine-identity lookup used by the transaction lock;
+// it is a variable so that tests can observe whether the expensive
+// runtime.Stack path is taken.
+var goroutineID = currentGoroutineID
+
 func (ev *Evaler) lockGlobalEval() {
+	ev.lockGlobalEvalGoid(0)
+}
+
+// lockGlobalEvalGoid acquires the transaction, treating the caller as the
+// current owner's goroutine when goid is a cached identity of that goroutine,
+// as carried by a Frame created during the transaction; goid 0 means the
+// caller doesn't know and falls back to a goroutine-ID lookup.
+func (ev *Evaler) lockGlobalEvalGoid(goid uint64) {
 	ev.globalEvalMu.Lock()
-	for ev.globalEvalDepth > 0 && !ev.sameGoroutineAsOwner() {
+	for ev.globalEvalDepth > 0 && !ev.sameActor(goid) {
 		if ev.globalEvalCond == nil {
 			ev.globalEvalCond = sync.NewCond(&ev.globalEvalMu)
 		}
@@ -179,10 +196,12 @@ func (ev *Evaler) lockGlobalEval() {
 // lockGlobalEvalTxn acquires the transaction for a long-running section that
 // executes code which may reenter - user code, hooks, Go functions calling
 // back into the Evaler - recording the caller as the owner so that nested
-// acquisitions on the same goroutine reenter instead of blocking. Short
-// sections that run no such code use lockGlobalEval and stay free of
-// goroutine-identity work.
-func (ev *Evaler) lockGlobalEvalTxn() {
+// acquisitions on the same goroutine reenter instead of blocking. It returns
+// the owner's goroutine identity; callers execute that code with a Frame
+// carrying it, so nested acquisitions skip the identity lookup, whose cost
+// grows with stack depth. Short sections that run no such code use
+// lockGlobalEval and stay free of goroutine-identity work.
+func (ev *Evaler) lockGlobalEvalTxn() uint64 {
 	ev.globalEvalMu.Lock()
 	for ev.globalEvalDepth > 0 && !ev.sameGoroutineAsOwner() {
 		if ev.globalEvalCond == nil {
@@ -191,25 +210,36 @@ func (ev *Evaler) lockGlobalEvalTxn() {
 		ev.globalEvalCond.Wait()
 	}
 	if !ev.globalEvalOwnerKnown {
-		ev.globalEvalOwnerID = currentGoroutineID()
+		ev.globalEvalOwnerID = goroutineID()
 		ev.globalEvalOwnerKnown = true
 	}
+	owner := ev.globalEvalOwnerID
 	ev.globalEvalDepth++
 	ev.globalEvalMu.Unlock()
+	return owner
 }
 
-// sameGoroutineAsOwner reports whether the calling goroutine is the one
-// recorded as the owner of the active transaction. It must be called with
-// globalEvalMu held, while a transaction is active.
-//
-// The owner is recorded once per long-running transaction, when it acquires
-// the transaction via lockGlobalEvalTxn. While the owner is not recorded -
-// which only happens for short sections that run no code which could
-// reenter - every caller is conservatively treated as a different goroutine
-// and blocks.
+// sameActor reports whether the caller identified by goid - a cached
+// goroutine identity, 0 for unknown - is the goroutine recorded as the owner
+// of the active transaction. It must be called with globalEvalMu held, while
+// a transaction is active.
+func (ev *Evaler) sameActor(goid uint64) bool {
+	if goid != 0 {
+		return ev.globalEvalOwnerKnown && goid == ev.globalEvalOwnerID
+	}
+	return ev.sameGoroutineAsOwner()
+}
+
+// sameGoroutineAsOwner is the frame-less fallback: it computes the caller's
+// goroutine identity with a runtime.Stack parse, whose cost grows with stack
+// depth. The owner is recorded once per long-running transaction, when it
+// acquires the transaction via lockGlobalEvalTxn. While the owner is not
+// recorded - which only happens for short sections that run no code which
+// could reenter - every caller is conservatively treated as a different
+// goroutine and blocks.
 func (ev *Evaler) sameGoroutineAsOwner() bool {
 	return ev.globalEvalOwnerKnown &&
-		ev.globalEvalOwnerID == currentGoroutineID()
+		ev.globalEvalOwnerID == goroutineID()
 }
 
 func (ev *Evaler) unlockGlobalEval() {
@@ -255,12 +285,8 @@ func NewEvaler() *Evaler {
 	ev.PreExitHooks = []func(){func() {
 		CallHook(ev, nil, "before-exit", beforeExitHookElvish.Get().(vals.List))
 	}}
-	ev.BeforeChdir = []func(string){func(path string) {
-		CallHook(ev, nil, "before-chdir", beforeChdirElvish.Get().(vals.List), path)
-	}}
-	ev.AfterChdir = []func(string){func(path string) {
-		CallHook(ev, nil, "after-chdir", afterChdirElvish.Get().(vals.List), path)
-	}}
+	ev.beforeChdirElvish = beforeChdirElvish
+	ev.afterChdirElvish = afterChdirElvish
 
 	ev.ExtendBuiltin(BuildNs().
 		AddVar("pwd", NewPwdVar(ev)).
@@ -316,7 +342,15 @@ func (ev *Evaler) Global() *Ns {
 // variable Get/Set still operate on liveVars. Callers that only need to look
 // up a single name should use GlobalVar instead, which does not clone.
 func (ev *Evaler) GlobalSnapshot() *Ns {
-	ev.lockGlobalEval()
+	return ev.globalSnapshotGoid(0)
+}
+
+// globalSnapshotGoid is like GlobalSnapshot, with goid being the cached
+// goroutine identity of the frame the snapshot was triggered from (0 for
+// unknown), letting it reenter a running default-global transaction without
+// a goroutine-ID lookup.
+func (ev *Evaler) globalSnapshotGoid(goid uint64) *Ns {
+	ev.lockGlobalEvalGoid(goid)
 	defer ev.unlockGlobalEval()
 	return ev.global.clone()
 }
@@ -425,9 +459,20 @@ func (ev *Evaler) addNumBgJobs(delta int) {
 // directory, and the functions in afterChdir immediately after (if chdir was
 // successful). It returns nil as long as the directory changing part succeeds.
 func (ev *Evaler) Chdir(path string) error {
+	return ev.chdir(0, path)
+}
+
+// chdir is like Chdir, with goid being the cached goroutine identity of the
+// frame the chdir was triggered from (0 for unknown). It is passed to the
+// Elvish hook functions so that they reenter a running default-global
+// transaction without a goroutine-ID lookup, whose cost grows with stack
+// depth.
+func (ev *Evaler) chdir(goid uint64, path string) error {
 	for _, hook := range ev.BeforeChdir {
 		hook(path)
 	}
+	callHookGoid(ev, goid, nil, "before-chdir",
+		ev.beforeChdirElvish.Get().(vals.List), path)
 
 	err := os.Chdir(path)
 	if err != nil {
@@ -437,6 +482,8 @@ func (ev *Evaler) Chdir(path string) error {
 	for _, hook := range ev.AfterChdir {
 		hook(path)
 	}
+	callHookGoid(ev, goid, nil, "after-chdir",
+		ev.afterChdirElvish.Get().(vals.List), path)
 
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -504,8 +551,9 @@ func (ev *Evaler) Eval(src parse.Source, cfg EvalCfg) error {
 	}
 
 	defaultGlobal := cfg.Global == nil
+	var ownerGoid uint64
 	if defaultGlobal {
-		ev.lockGlobalEvalTxn()
+		ownerGoid = ev.lockGlobalEvalTxn()
 		defer ev.unlockGlobalEval()
 	}
 	ev.mu.RLock()
@@ -526,6 +574,7 @@ func (ev *Evaler) Eval(src parse.Source, cfg EvalCfg) error {
 
 	fm, cleanup := ev.prepareFrame(src, cfg)
 	defer cleanup()
+	fm.goid = ownerGoid
 
 	newLocal, exec := op.prepare(fm)
 	if defaultGlobal {
@@ -571,13 +620,23 @@ func (cfg *CallCfg) fillDefaults() {
 // transactions, and only when the callback cannot block on work that needs
 // globalEvalMu.
 func (ev *Evaler) Call(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
+	return ev.callGoid(0, f, callCfg, evalCfg)
+}
+
+// callGoid is like Call, with goid being the cached goroutine identity of the
+// frame the call was triggered from (0 for unknown). The snapshot taken for
+// the call, and any nested acquisitions made by code running on the call's
+// frame, reenter a running default-global transaction through it without a
+// goroutine-ID lookup.
+func (ev *Evaler) callGoid(goid uint64, f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
 	callCfg.fillDefaults()
 	evalCfg.fillDefaults()
 	if evalCfg.Global == nil {
-		evalCfg.Global = ev.GlobalSnapshot()
+		evalCfg.Global = ev.globalSnapshotGoid(goid)
 	}
 	fm, cleanup := ev.prepareFrame(parse.Source{Name: callCfg.From}, evalCfg)
 	defer cleanup()
+	fm.goid = goid
 	return f.Call(fm, callCfg.Args, callCfg.Opts)
 }
 
@@ -590,11 +649,12 @@ func (ev *Evaler) Call(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
 func (ev *Evaler) CallInDefaultGlobal(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
 	callCfg.fillDefaults()
 	evalCfg.fillDefaults()
-	ev.lockGlobalEvalTxn()
+	ownerGoid := ev.lockGlobalEvalTxn()
 	defer ev.unlockGlobalEval()
 	evalCfg.Global = ev.global
 	fm, cleanup := ev.prepareFrame(parse.Source{Name: callCfg.From}, evalCfg)
 	defer cleanup()
+	fm.goid = ownerGoid
 	return f.Call(fm, callCfg.Args, callCfg.Opts)
 }
 
@@ -606,7 +666,7 @@ func (ev *Evaler) prepareFrame(src parse.Source, cfg EvalCfg) (*Frame, func()) {
 
 	ports := fillDefaultDummyPorts(cfg.Ports)
 
-	fm := &Frame{ev, src, cfg.Global, new(Ns), nil, nil, intCtx, ports, nil, false, false, 0, nil}
+	fm := &Frame{ev, src, cfg.Global, new(Ns), nil, nil, intCtx, ports, nil, false, false, 0, nil, 0}
 	return fm, func() {
 		if cfg.PutInFg {
 			err := putSelfInFg()
