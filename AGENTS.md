@@ -25,9 +25,6 @@ completion/runtime features on top of upstream Elvish (see
 -   Most code lives under `pkg/`. `website/` is a separate Go module
     (`src.elv.sh/website`) that replaces `src.elv.sh` with `../`.
 
--   `e2e/` contains end-to-end transcript tests that build the binary at
-    runtime.
-
 ## Architecture
 
 High-level layout (see `docs/architecture/doc.go` for the full overview):
@@ -116,7 +113,7 @@ go generate ./...              # regenerate stringer outputs (needs stringer)
 Coverage:
 
 ```sh
-make cover                     # unit + e2e coverage, opens HTML report
+make cover                     # unit coverage, opens HTML report
 ```
 
 Website:
@@ -200,7 +197,32 @@ ln -s ../../tools/pre-push .git/hooks/pre-push
 
 ## Fork-specific features
 
-This fork (branch `tabdance`, default remote) adds:
+This fork adds on top of upstream Elvish:
+
+-   **Declaration rollback on failure** (fixes #47, upstream elves/elvish#1445):
+    when a chunk ends with an exception, declarations (`var`/`fn`/`use`) whose
+    ops never executed are rolled back, while pre-failure effects are kept.
+    Mechanism: `staticVarInfo` carries runtime flags
+    (`hidden`/`activated`/`captured`, `pkg/eval/ns.go`); declaration ops mark
+    entries when they run (`unhideLocalRef`, `fnOp`, `useOp`, `delLocalVarOp`);
+    on failure `rollbackAfterChunkException` (`pkg/eval/compiler.go`) resolves
+    per-name winners and tombstones never-executed entries, which
+    `Ns.withoutTombstones` sweeps before the next compilation. Failed `?(...)`
+    captures tombstone only their own declarations so enclosing compiled indices
+    stay valid. Forms dispatched to pipeline goroutines get a private metadata
+    copy of the namespace (`pipelineOp.exec` in `pkg/eval/compile_effect.go`) so
+    background ops cannot race the rollback. Tests: `pkg/eval/rollback_test.go`,
+    transcripts in `pkg/eval/builtin_special_test.elvts`.
+
+-   **Default-global concurrency contract**: default-global `Eval`,
+    `ExtendGlobal`, `DeleteFromGlobal`, `CallInDefaultGlobal` and the readers
+    `GlobalSnapshot`/`GlobalVar` serialize on a reentrant transaction
+    (`globalEvalMu`; see the contract comment on `Evaler` in
+    `pkg/eval/eval.go`). Goroutine identity is parsed from `runtime.Stack` only
+    while a transaction is active, so uncontended paths stay cheap. Use
+    `GlobalVar` for point lookups (highlighting, completion) and
+    `GlobalSnapshot` only when iterating. `Evaler.Global()` returns the live
+    namespace; its metadata mutates during a default-global eval.
 
 -   **Command completer**: `$edit:completion:command-completer` (a function) is
     called with the seed (partial command name) and should output candidates;
@@ -239,6 +261,11 @@ This fork (branch `tabdance`, default remote) adds:
 -   Commands/flags: `pkg/shell/shell.go`, `pkg/prog`.
 
 -   Language semantics: `pkg/eval/compile_*.go`, `pkg/eval/builtin_*.go`.
+
+-   Declaration rollback and namespace metadata: `rollbackAfterChunkException`
+    and `nsOp.prepare` in `pkg/eval/compiler.go`, `staticVarInfo` in
+    `pkg/eval/ns.go`, the global-eval contract on `Evaler` in
+    `pkg/eval/eval.go`.
 
 -   Parser: `pkg/parse`.
 

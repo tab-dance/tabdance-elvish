@@ -89,6 +89,14 @@ func (op *pipelineOp) exec(fm *Frame) Exception {
 	// For each form, create a dedicated evalCtx and run asynchronously
 	for i, formOp := range op.subops {
 		newFm := fm.Fork()
+		if i != nforms-1 || op.bg {
+			// This form runs on another goroutine. Give it a private copy
+			// of the namespace metadata, so that its declaration ops cannot
+			// race the chunk's rollback bookkeeping, which mutates the
+			// shared namespace in place on the main goroutine. Variable
+			// objects are shared, so value updates remain visible.
+			newFm.local = fm.local.clone()
+		}
 		inputIsPipe := i > 0
 		outputIsPipe := i < nforms-1
 		var pipeIn *Port

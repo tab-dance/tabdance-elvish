@@ -62,7 +62,7 @@ func hasCommand(ev *eval.Evaler, cmd string) bool {
 	switch {
 	case rest == "":
 		// Unqualified name; try builtin and global.
-		if hasFn(ev.Builtin(), first) || hasFn(ev.Global(), first) {
+		if hasFn(ev.Builtin(), first) || hasGlobalFn(ev, first) {
 			return true
 		}
 	case first == "e:":
@@ -82,12 +82,16 @@ func hasQualifiedFn(ev *eval.Evaler, firstNs string, rest string) bool {
 	if rest == "" {
 		return false
 	}
-	modVal, ok := ev.Global().Index(firstNs)
-	if !ok {
+	modVar := ev.GlobalVar(firstNs)
+	var modVal any
+	var ok bool
+	if modVar == nil {
 		modVal, ok = ev.Builtin().Index(firstNs)
 		if !ok {
 			return false
 		}
+	} else {
+		modVal = modVar.Get()
 	}
 	mod, ok := modVal.(*eval.Ns)
 	if !ok {
@@ -113,6 +117,17 @@ func hasFn(ns *eval.Ns, name string) bool {
 		return false
 	}
 	_, ok = fnVar.(eval.Callable)
+	return ok
+}
+
+// hasGlobalFn is like hasFn for the default global namespace, using the
+// locked point lookup of GlobalVar instead of cloning the whole namespace.
+func hasGlobalFn(ev *eval.Evaler, name string) bool {
+	fnVar := ev.GlobalVar(name + eval.FnSuffix)
+	if fnVar == nil {
+		return false
+	}
+	_, ok := fnVar.Get().(eval.Callable)
 	return ok
 }
 

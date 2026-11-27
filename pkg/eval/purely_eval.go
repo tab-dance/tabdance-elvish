@@ -67,7 +67,9 @@ func (ev *Evaler) PurelyEvalPrimary(pn *parse.Primary) any {
 		if sigil != "" {
 			return nil
 		}
-		fm := &Frame{Evaler: ev, local: ev.Global(), up: new(Ns)}
+		// Use a metadata-consistent snapshot of the default global; variable
+		// slots are shared with the live namespace, so values stay current.
+		fm := &Frame{Evaler: ev, local: ev.GlobalSnapshot(), up: new(Ns)}
 		ref := resolveVarRef(fm, qname, nil)
 		if ref != nil {
 			variable := deref(fm, ref)

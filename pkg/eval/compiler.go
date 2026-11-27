@@ -31,6 +31,10 @@ type compiler struct {
 	deprecations deprecationRegistry
 	// Information about the source.
 	src parse.Source
+	// Whether declarations being compiled belong to an exception-capture chunk
+	// (?(...)); their rollback is handled by the capture, not the enclosing
+	// chunk.
+	inCapture bool
 	// Compilation errors.
 	errors []*CompilationError
 	// Suggested code to fix potential issues found during compilation.
@@ -47,9 +51,100 @@ func compile(b, g *staticNs, modules []string, tree parse.Tree, w io.Writer) (ns
 		b, []*staticNs{g}, []*staticUpNs{new(staticUpNs)},
 		[]*scopePragma{{unknownCommandIsExternal: true}},
 		modules,
-		w, newDeprecationRegistry(), tree.Source, nil, nil}
+		w, newDeprecationRegistry(), tree.Source, false, nil, nil}
 	chunkOp := cp.chunkOp(tree.Root)
 	return nsOp{chunkOp, g}, cp.autofixes, diag.PackErrors(cp.errors)
+}
+
+// rollbackAfterChunkException restores the namespace state after an exception:
+// effects of ops that executed before the failure are kept, declarations that
+// never executed are undone (tab-dance/tabdance-elvish#47, upstream #1445).
+//
+// Per variable name, the entry of the last op that executed wins: an executed
+// declaration or assignment makes that entry the visible binding, reverting
+// any shadow-deletion projected by later unexecuted forms, and an executed del
+// leaves the name deleted (delLocalVarOp marks its entry hidden to distinguish
+// an executed del from compile-time shadow-deletion metadata). Entries not
+// touched by an executed op are restored to their pre-chunk state (below the
+// chunk's rollback boundary) or tombstoned (at or beyond it), so rolled-back
+// declarations are unresolvable both at runtime and to later compilations.
+// Tombstones preserve the slot layout: forms still running in background
+// pipelines hold the same namespace object, and truncating it in place would
+// race or panic. The next compilation sweeps tombstones away (see
+// Ns.withoutTombstones), so they do not accumulate.
+//
+// When capture is false (chunk-level rollback), execution of the code that
+// failed has stopped, and all unexecuted declarations of the chunk are
+// tombstoned. When capture is true (exception captured by ?(...)), execution
+// continues in the enclosing chunk: only declarations belonging to the capture
+// (marked captured at compile time) are tombstoned, while pending declarations
+// of enclosing forms are left for their own ops.
+func rollbackAfterChunkException(fm *Frame, capture bool) {
+	boundary := fm.rollbackBoundary
+	infos := fm.local.infos
+	for i := 0; i < boundary && i < len(fm.rollbackOrig); i++ {
+		if infos[i].activated {
+			continue
+		}
+		infos[i].hidden = fm.rollbackOrig[i].hidden
+		infos[i].deleted = fm.rollbackOrig[i].deleted
+	}
+	byName := map[string][]int{}
+	for i, info := range infos {
+		byName[info.name] = append(byName[info.name], i)
+	}
+	for _, idxs := range byName {
+		winner := -1
+		for _, i := range idxs {
+			if infos[i].activated {
+				winner = i
+			}
+		}
+		if winner == -1 {
+			// Nothing executed for this name: pre-existing entries were
+			// restored above; the chunk's own pending declarations are
+			// tombstoned (when inside a failed capture, only those of the
+			// capture itself).
+			for _, i := range idxs {
+				if i >= boundary {
+					markEntryGone(infos, i, capture)
+				}
+			}
+			continue
+		}
+		var finalHidden, finalDeleted bool
+		if infos[winner].deleted && infos[winner].hidden {
+			// Executed del: the name stays deleted.
+			finalHidden, finalDeleted = true, true
+		}
+		for _, i := range idxs {
+			if i == winner {
+				infos[i].hidden = finalHidden
+				infos[i].deleted = finalDeleted
+				continue
+			}
+			infos[i].hidden = true
+			if i >= boundary && !infos[i].activated {
+				markEntryGone(infos, i, capture)
+			} else {
+				infos[i].deleted = true
+			}
+		}
+	}
+}
+
+// Marks a never-executed entry at or beyond the chunk's rollback boundary as
+// gone, by making it a tombstone: hidden, so that it is swept away by the next
+// compilation (see Ns.withoutTombstones), and deleted, so that it is
+// unresolvable by runtime and compile-time lookups until then. When the
+// exception was captured by ?(...), only entries declared inside the capture
+// are tombstoned; pending declarations of enclosing forms are left untouched,
+// as their own ops may still run.
+func markEntryGone(infos []staticVarInfo, i int, capture bool) {
+	if !capture || infos[i].captured {
+		infos[i].hidden = true
+		infos[i].deleted = true
+	}
 }
 
 type nsOp struct {
@@ -60,21 +155,44 @@ type nsOp struct {
 // Prepares the local namespace, and returns the namespace and a function for
 // executing the inner effectOp. Mutates fm.local.
 func (op nsOp) prepare(fm *Frame) (*Ns, func() Exception) {
-	if len(op.template.infos) > len(fm.local.infos) {
-		n := len(op.template.infos)
-		newLocal := &Ns{make([]vars.Var, n), op.template.infos}
-		copy(newLocal.slots, fm.local.slots)
-		for i := len(fm.local.infos); i < n; i++ {
-			// TODO: Take readOnly into account too
-			newLocal.slots[i] = MakeVarFromName(newLocal.infos[i].name)
-		}
-		fm.local = newLocal
-	} else {
-		// If no new variable has been created, there might still be some
-		// existing variables deleted.
-		fm.local = &Ns{fm.local.slots, op.template.infos}
+	origInfos := append([]staticVarInfo(nil), fm.local.infos...)
+
+	n := len(op.template.infos)
+	if n < len(origInfos) {
+		n = len(origInfos)
 	}
-	return fm.local, func() Exception { return op.inner.exec(fm) }
+	newLocal := &Ns{make([]vars.Var, n), make([]staticVarInfo, n)}
+	copy(newLocal.slots, fm.local.slots)
+	copy(newLocal.infos, origInfos)
+	if len(op.template.infos) >= len(origInfos) {
+		copy(newLocal.infos[:len(op.template.infos)], op.template.infos)
+	}
+	for i := 0; i < len(origInfos) && i < len(newLocal.infos); i++ {
+		// Activation tracks execution in this chunk evaluation for rollback.
+		// Pre-existing slots start unactivated; executed ops set it.
+		newLocal.infos[i].activated = false
+	}
+	for i := len(origInfos); i < len(op.template.infos); i++ {
+		// Appended entries are published with the chunk's compile-time
+		// projection, including shadow-deletions of earlier same-name entries
+		// (visible only once their declaration op executes; rollback undoes
+		// projections of forms that never ran).
+		newLocal.infos[i].hidden = false
+		newLocal.infos[i].activated = false
+		// TODO: Take readOnly into account too
+		newLocal.slots[i] = MakeVarFromName(newLocal.infos[i].name)
+	}
+	fm.local = newLocal
+	fm.rollbackBoundary = len(origInfos)
+	fm.rollbackOrig = origInfos
+	exec := func() Exception {
+		exc := op.inner.exec(fm)
+		if exc != nil {
+			rollbackAfterChunkException(fm, false)
+		}
+		return exc
+	}
+	return fm.local, exec
 }
 
 type CompilationError = diag.Error[CompilationErrorTag]

@@ -48,6 +48,15 @@ type Frame struct {
 	// Set by exec with no command arguments to request that file redirections
 	// applied to this frame persist in the calling frame.
 	persistExecRedirs bool
+
+	// Index in local from which the current chunk's own declarations start;
+	// entries at or beyond it that never executed are removed by rollback.
+	// Set when a chunk's namespace is prepared.
+	rollbackBoundary int
+
+	// Namespace metadata of the entries below rollbackBoundary before the
+	// current chunk started; rollback restores them from here.
+	rollbackOrig []staticVarInfo
 }
 
 // PrepareEval prepares a piece of code for evaluation in a copy of the current
@@ -74,12 +83,16 @@ func (fm *Frame) prepareEval(src parse.Source, r diag.Ranger, ns, evalNs *Ns) (*
 	if ns != nil {
 		local = ns
 	}
+	// Tombstones of rolled-back declarations don't persist across chunks;
+	// sweep them before compiling, since compiled variable references are
+	// indices into the swept layout.
+	local = local.withoutTombstones()
 	traceback := fm.traceback
 	if r != nil {
 		traceback = fm.addTraceback(r)
 	}
 	newFm := &Frame{
-		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background, false}
+		fm.Evaler, src, local, new(Ns), evalNs, nil, fm.ctx, fm.ports, traceback, fm.background, false, 0, nil}
 	op, _, err := compile(fm.Evaler.Builtin().static(), local.static(), nil, tree, fm.ErrorFile())
 	if err != nil {
 		return nil, nil, err
@@ -217,6 +230,7 @@ func (fm *Frame) Fork() *Frame {
 		fm.local, fm.up, fm.evalNs, fm.defers,
 		fm.ctx, newPorts,
 		fm.traceback, fm.background, false,
+		fm.rollbackBoundary, fm.rollbackOrig,
 	}
 }
 

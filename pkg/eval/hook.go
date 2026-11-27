@@ -16,6 +16,14 @@ import (
 //
 // - Chdir hooks should use the frame from which the chdir is triggered.
 // - Editor lifecycle hooks should use the editor's TTY.
+//
+// Default-global hooks use Call, which snapshots the default global namespace
+// metadata and executes outside globalEvalMu. This keeps hook execution
+// compatible with editor/prompt callbacks and avoids deadlocks when hooks block
+// or trigger reentrant eval-sensitive work. Hooks are not serialized as a
+// transaction with concurrent Eval/ExtendGlobal/DeleteFromGlobal; callers that
+// need serialized observation should use CallInDefaultGlobal explicitly and
+// ensure callbacks cannot block on globalEvalMu.
 func CallHook(ev *Evaler, evalCfg *EvalCfg, name string, hook vals.List, args ...any) {
 	if hook.Len() == 0 {
 		return

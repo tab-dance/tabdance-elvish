@@ -283,7 +283,14 @@ func (cp *compiler) primaryOp(n *parse.Primary) valuesOp {
 		cp.errorpf(n, "compiler bug: Tilde not handled in .compound")
 		return literalValues(n, "~")
 	case parse.ExceptionCapture:
-		return exceptionCaptureOp{n.Range(), cp.chunkOp(n.Chunk)}
+		// Track that declarations inside the capture belong to it: when the
+		// capture fails, they are undone by its own rollback, not the
+		// enclosing chunk's.
+		prevInCapture := cp.inCapture
+		cp.inCapture = true
+		op := exceptionCaptureOp{n.Range(), cp.chunkOp(n.Chunk)}
+		cp.inCapture = prevInCapture
+		return op
 	case parse.OutputCapture:
 		return outputCaptureOp{n.Range(), cp.chunkOp(n.Chunk)}
 	case parse.List:
@@ -357,6 +364,11 @@ func (op exceptionCaptureOp) exec(fm *Frame) ([]any, Exception) {
 	if exc == nil {
 		return []any{OK}, nil
 	}
+	// The captured chunk shares the local namespace with the enclosing chunk,
+	// so a failure inside it must roll back its own declarations, but execution
+	// continues afterwards: capture-internal declarations are tombstoned, so
+	// that compiled indices of the enclosing chunk stay valid.
+	rollbackAfterChunkException(fm, true)
 	return []any{exc}, nil
 }
 

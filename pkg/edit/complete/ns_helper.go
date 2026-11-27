@@ -17,7 +17,7 @@ var environ = os.Environ
 func eachVariableInNs(ev *eval.Evaler, p np.Path, ns string, f func(s string)) {
 	switch ns {
 	case "", ":":
-		ev.Global().IterateKeysString(f)
+		ev.GlobalSnapshot().IterateKeysString(f)
 		ev.Builtin().IterateKeysString(f)
 		eachDefinedVariable(p[len(p)-1], p[0].Range().From, f)
 	case "e:":
@@ -33,7 +33,7 @@ func eachVariableInNs(ev *eval.Evaler, p np.Path, ns string, f func(s string)) {
 	default:
 		// TODO: Support namespaces defined in the code too.
 		segs := eval.SplitQNameSegs(ns)
-		mod := ev.Global().IndexString(segs[0])
+		mod := ev.GlobalVar(segs[0])
 		if mod == nil {
 			mod = ev.Builtin().IndexString(segs[0])
 		}

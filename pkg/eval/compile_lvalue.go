@@ -89,8 +89,11 @@ func (cp *compiler) compileIndexingLValue(n *parse.Indexing, f lvalueFlag) lvalu
 		if len(segs) == 1 {
 			// Unqualified name - implicit local
 			name := segs[0]
+			scope := cp.thisScope()
+			hidden := !scope.hasVisible(name)
+			index := scope.addWith(name, hidden, cp.inCapture)
 			ref = &varRef{localScope,
-				staticVarInfo{name, false, false}, cp.thisScope().add(name), nil}
+				staticVarInfo{name, false, false, hidden, !hidden, cp.inCapture}, index, nil}
 		} else {
 			cp.errorpf(n, "cannot create variable $%s; "+
 				"new variables can only be created in the current scope",
@@ -144,14 +147,27 @@ func doAssign(fm *Frame, r diag.Ranger, lhs lvaluesGroup, rhs valuesOp, rc resto
 	if exc != nil {
 		return exc
 	}
-
-	// Now perform assignment.
-	var modifiedHeads []vars.Var
-	if rest := lhs.rest; rest == -1 {
+	// Check the arity before exposing hidden LHS declarations, so that a form
+	// with the wrong number of values does not leak fresh variables.
+	if lhs.rest == -1 {
 		if len(variables) != len(values) {
 			return fm.errorp(r, errs.ArityMismatch{What: "assignment right-hand-side",
 				ValidLow: len(variables), ValidHigh: len(variables), Actual: len(values)})
 		}
+	} else if len(values) < len(variables)-1 {
+		return fm.errorp(r, errs.ArityMismatch{What: "assignment right-hand-side",
+			ValidLow: len(variables) - 1, ValidHigh: -1, Actual: len(values)})
+	}
+	// Expose hidden LHS declarations only after the RHS and the arity check
+	// have succeeded, so that a failed declaration form stays hidden
+	// (elves/elvish#1445).
+	for _, lv := range lhs.lvalues {
+		unhideLocalRef(fm, lv.ref)
+	}
+
+	// Now perform assignment.
+	var modifiedHeads []vars.Var
+	if rest := lhs.rest; rest == -1 {
 		for i, variable := range variables {
 			variable, exc = refreshLValue(fm, lhs.lvalues[i], variable, modifiedHeads)
 			if exc != nil {
@@ -164,10 +180,6 @@ func doAssign(fm *Frame, r diag.Ranger, lhs lvaluesGroup, rhs valuesOp, rc resto
 			modifiedHeads = noteModifiedHead(modifiedHeads, variable)
 		}
 	} else {
-		if len(values) < len(variables)-1 {
-			return fm.errorp(r, errs.ArityMismatch{What: "assignment right-hand-side",
-				ValidLow: len(variables) - 1, ValidHigh: -1, Actual: len(values)})
-		}
 		for i := 0; i < rest; i++ {
 			variable, exc := refreshLValue(fm, lhs.lvalues[i], variables[i], modifiedHeads)
 			if exc != nil {
