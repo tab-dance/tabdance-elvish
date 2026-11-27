@@ -324,12 +324,13 @@ func (ev *Evaler) PreExit() {
 // Global returns the current default global Ns.
 //
 // The returned *Ns is the live namespace object and may be replaced by
-// Eval/ExtendGlobal/DeleteFromGlobal. Its variable slots are safe for
-// concurrent Get/Set through vars.Var, but namespace metadata may be mutated
-// during a default-global Eval transaction. Callers that need a metadata-
-// consistent snapshot should use GlobalSnapshot; callers that need serialized
-// mutation/transaction semantics should use Eval/ExtendGlobal/
-// DeleteFromGlobal/CallInDefaultGlobal.
+// Eval/ExtendGlobal/DeleteFromGlobal. Namespace metadata may be mutated during
+// a default-global Eval transaction; callers that need a metadata-consistent
+// snapshot should use GlobalSnapshot. Variable slots are shared live objects;
+// concurrent Get/Set on the same variable is safe only if the variable
+// implementation is synchronized. Callers that need serialized mutation/
+// transaction semantics should use Eval/ExtendGlobal/DeleteFromGlobal/
+// CallInDefaultGlobal.
 func (ev *Evaler) Global() *Ns {
 	ev.mu.RLock()
 	defer ev.mu.RUnlock()
