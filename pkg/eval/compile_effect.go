@@ -96,6 +96,10 @@ func (op *pipelineOp) exec(fm *Frame) Exception {
 			// shared namespace in place on the main goroutine. Variable
 			// objects are shared, so value updates remain visible.
 			newFm.local = fm.local.clone()
+			// The cached goroutine identity is that of this goroutine, not
+			// the one the form executes on; using it to reenter the
+			// default-global transaction there would be unsound.
+			newFm.goid = 0
 		}
 		inputIsPipe := i > 0
 		outputIsPipe := i < nforms-1

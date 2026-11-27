@@ -149,24 +149,29 @@ func BenchmarkEvalDefaultGlobalReadOnly(b *testing.B) {
 // at the bottom of a recursive Elvish function probes the transaction from
 // inside a running default-global Eval. The mode runs isolate the costs:
 // "control" does no probe, "idonly" computes the goroutine identity alone
-// (the runtime.Stack parse that reentrancy detection needs), and "snapshot"
-// takes the reentrant reader lock like a chdir hook would. The growth of
-// idonly/snapshot over control with depth is the baseline for
-// https://github.com/tab-dance/tabdance-elvish/issues/57.
+// (the runtime.Stack parse that the frame-less fallback needs),
+// "snapshot-fallback" takes the reentrant reader through the frame-less
+// Evaler method, and "snapshot-frame" takes it through the frame's cached
+// goroutine identity, as the chdir hook chain does since #57. The growth of
+// snapshot-frame over control with depth is the residual cost of the
+// frame-carrying path; the gap between snapshot-fallback and snapshot-frame
+// is what #57 recovered.
 var (
 	benchSnapshotSink    *Ns
 	benchGoroutineIDSink uint64
 )
 
 func BenchmarkEvalReentrantLockAtDepth(b *testing.B) {
-	for _, mode := range []string{"control", "idonly", "snapshot"} {
+	for _, mode := range []string{"control", "idonly", "snapshot-fallback", "snapshot-frame"} {
 		ev := NewEvaler()
-		ev.ExtendGlobal(BuildNs().AddGoFn("reenter", func() {
+		ev.ExtendGlobal(BuildNs().AddGoFn("reenter", func(fm *Frame) {
 			switch mode {
 			case "idonly":
 				benchGoroutineIDSink = currentGoroutineID()
-			case "snapshot":
+			case "snapshot-fallback":
 				benchSnapshotSink = ev.GlobalSnapshot()
+			case "snapshot-frame":
+				benchSnapshotSink = ev.globalSnapshotGoid(fm.goid)
 			}
 		}).Ns())
 		if err := ev.Eval(parse.Source{Name: "[benchmark]", Code: `fn rec {|n|

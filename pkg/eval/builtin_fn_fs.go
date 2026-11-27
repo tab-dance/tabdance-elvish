@@ -32,7 +32,7 @@ func cd(fm *Frame, args ...string) error {
 		return errs.ArityMismatch{What: "arguments", ValidLow: 0, ValidHigh: 1, Actual: len(args)}
 	}
 
-	return fm.Evaler.Chdir(dir)
+	return fm.Evaler.chdir(fm.goid, dir)
 }
 
 func tildeAbbr(path string) string {

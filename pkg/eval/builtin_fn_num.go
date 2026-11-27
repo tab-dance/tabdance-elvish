@@ -264,7 +264,7 @@ func slash(fm *Frame, args ...vals.Num) error {
 	if len(args) == 0 {
 		fm.Deprecate("implicit cd is deprecated; use cd or location mode instead", fm.traceback.Head, 21)
 		// cd /
-		return fm.Evaler.Chdir("/")
+		return fm.Evaler.chdir(fm.goid, "/")
 	}
 	// Division
 	result, err := div(args...)
