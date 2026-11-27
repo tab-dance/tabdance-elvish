@@ -93,7 +93,7 @@ func generateArgs(args []string, ev *eval.Evaler, p np.Path, cfg Config) ([]RawI
 		addItem := func(varname string) {
 			items = append(items, noQuoteItem(parse.QuoteVariableName(varname)))
 		}
-		ev.Global().IterateKeysString(addItem)
+		ev.GlobalSnapshot().IterateKeysString(addItem)
 		eachDefinedVariable(p[len(p)-1], p[0].Range().From, addItem)
 		return items, nil
 	}

@@ -104,7 +104,7 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 	local := &Ns{make([]vars.Var, localSize), make([]staticVarInfo, localSize)}
 
 	for i, name := range c.ArgNames {
-		local.infos[i] = staticVarInfo{name, false, false}
+		local.infos[i] = staticVarInfo{name, false, false, false, false, false}
 	}
 	if c.RestArg == -1 {
 		for i := range c.ArgNames {
@@ -128,7 +128,7 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 		if !ok {
 			v = c.OptDefaults[i]
 		}
-		local.infos[offset+i] = staticVarInfo{name, false, false}
+		local.infos[offset+i] = staticVarInfo{name, false, false, false, false, false}
 		local.slots[offset+i] = vars.FromInit(v)
 	}
 
@@ -140,6 +140,11 @@ func (c *Closure) Call(fm *Frame, args []any, opts map[string]any) error {
 	}
 
 	fm.local = local
+	fm.rollbackBoundary = offset
+	// The rollback metadata of the caller's namespace does not describe this
+	// function's local scope; keeping it would make a failed capture inside
+	// the function restore argument metadata from unrelated caller entries.
+	fm.rollbackOrig = nil
 	fm.src = c.Src
 	fm.defers = new([]func(*Frame) Exception)
 	exc := c.op.exec(fm)

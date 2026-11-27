@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 
@@ -87,6 +88,135 @@ type Evaler struct {
 	notifyBgJobSuccess bool
 	// The current number of background jobs, exposed as $num-bg-jobs.
 	numBgJobs int
+
+	// Default-global namespace concurrency contract (fix/issue-1445-decl-after-fail).
+	//
+	// Problem: one chunk must roll back unexecuted post-failure declarations
+	// (elves/elvish#1445) while preserving executed pre-failure effects. The
+	// rollback mutates ns transaction metadata (hidden/activated/deleted) and
+	// publishes global ns updates. Concurrent default-global Eval raced on that
+	// shared state; serializing Eval fixed races but deadlocked when editor
+	// addons (edit:instant) nested Eval on the same goroutine.
+	//
+	// Minimal/safe contract:
+	//   - Eval(default global), ExtendGlobal, DeleteFromGlobal, and
+	//     CallInDefaultGlobal take globalEvalMu. They serialize namespace
+	//     transaction boundaries, global publication, and structural ns mutation.
+	//   - globalEvalMu is reentrant per goroutine (owner+depth+cond) so nested
+	//     default-global Eval works. Goroutine identity is recorded only by
+	//     long-running holders (Eval, CallInDefaultGlobal) and consulted only
+	//     while a transaction is active, so uncontended acquisitions — the
+	//     common case for editor paths like highlighting — never parse it.
+	//   - Plain Call with nil Global snapshots ev.global under globalEvalMu,
+	//     then executes outside the lock. This avoids races with concurrent
+	//     transaction-metadata mutation while keeping callbacks from deadlocking
+	//     prompt/editor paths. It is not a serialized transaction with concurrent
+	//     Eval/ExtendGlobal/DeleteFromGlobal; callers needing serialized callback
+	//     execution must use CallInDefaultGlobal and must not block on work that
+	//     needs globalEvalMu.
+	//   - Custom cfg.Global bypasses globalEvalMu; caller synchronizes shared ns.
+	//
+	// Rollback of unexecuted declarations never restructures the published
+	// namespace in place: failed-chunk declarations become tombstones (hidden and
+	// deleted entries), which the next Eval sweeps away before compiling
+	// (Ns.withoutTombstones). Forms dispatched to pipeline goroutines get a private
+	// metadata copy of the namespace (shared variable objects), so their ops can
+	// neither race nor panic against the chunk's rollback bookkeeping.
+	//
+	// Risks: per-Evaler serialization/contention, goroutine-identity parsing on
+	// nested and contended paths only (with runtime stack-format sensitivity
+	// there), and plain Call remaining outside the transaction boundary.
+	//
+	// Alternatives considered: per-namespace/COW transaction snapshots (cleaner
+	// isolation, large semantic change), fine-grained ns metadata locking (high
+	// deadlock/race risk), explicit eval-transaction token threaded through
+	// EvalCfg/Frame/callbacks (cleaner ownership, invasive API change), or
+	// narrower lock scope around snapshot/commit only (unsafe while execution can
+	// observe/mutate shared ns state).
+	globalEvalMu         sync.Mutex
+	globalEvalCond       *sync.Cond
+	globalEvalDepth      int
+	globalEvalOwnerKnown bool
+	globalEvalOwnerID    uint64
+}
+
+func currentGoroutineID() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// "goroutine 123 [...]"
+	b := buf[:n]
+	const prefix = "goroutine "
+	if len(b) < len(prefix) || string(b[:len(prefix)]) != prefix {
+		panic("eval: cannot parse goroutine id")
+	}
+	b = b[len(prefix):]
+	i := 0
+	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		panic("eval: cannot parse goroutine id")
+	}
+	id, err := strconv.ParseUint(string(b[:i]), 10, 64)
+	if err != nil {
+		panic("eval: cannot parse goroutine id: " + err.Error())
+	}
+	return id
+}
+
+func (ev *Evaler) lockGlobalEval() {
+	ev.globalEvalMu.Lock()
+	for ev.globalEvalDepth > 0 && !ev.sameGoroutineAsOwner() {
+		if ev.globalEvalCond == nil {
+			ev.globalEvalCond = sync.NewCond(&ev.globalEvalMu)
+		}
+		ev.globalEvalCond.Wait()
+	}
+	ev.globalEvalDepth++
+	ev.globalEvalMu.Unlock()
+}
+
+// sameGoroutineAsOwner reports whether the calling goroutine is the one
+// recorded as the owner of the active transaction. It must be called with
+// globalEvalMu held, while a transaction is active.
+//
+// The owner is recorded once per long-running transaction by
+// noteGlobalEvalOwner. While the owner is not recorded — which only happens
+// for short sections that run no code which could reenter — every caller is
+// conservatively treated as a different goroutine and blocks.
+func (ev *Evaler) sameGoroutineAsOwner() bool {
+	return ev.globalEvalOwnerKnown &&
+		ev.globalEvalOwnerID == currentGoroutineID()
+}
+
+// noteGlobalEvalOwner records the calling goroutine as the owner of the
+// current transaction, allowing reentrant acquisition from code that runs
+// during it, such as chdir hooks or Go functions calling back into the
+// Evaler. Long-running holders (Eval, CallInDefaultGlobal) must call it
+// immediately after acquiring the transaction, before running any code.
+func (ev *Evaler) noteGlobalEvalOwner() {
+	ev.globalEvalMu.Lock()
+	if !ev.globalEvalOwnerKnown {
+		ev.globalEvalOwnerID = currentGoroutineID()
+		ev.globalEvalOwnerKnown = true
+	}
+	ev.globalEvalMu.Unlock()
+}
+
+func (ev *Evaler) unlockGlobalEval() {
+	ev.globalEvalMu.Lock()
+	if ev.globalEvalDepth == 0 {
+		ev.globalEvalMu.Unlock()
+		panic("eval: global eval lock released without being held")
+	}
+	ev.globalEvalDepth--
+	if ev.globalEvalDepth == 0 {
+		ev.globalEvalOwnerKnown = false
+		if ev.globalEvalCond != nil {
+			ev.globalEvalCond.Signal()
+		}
+	}
+	ev.globalEvalMu.Unlock()
 }
 
 // NewEvaler creates a new Evaler.
@@ -156,15 +286,48 @@ func (ev *Evaler) PreExit() {
 
 // Access methods.
 
-// Global returns the global Ns.
+// Global returns the current default global Ns.
+//
+// The returned *Ns is the live namespace object and may be replaced by
+// Eval/ExtendGlobal/DeleteFromGlobal. Its variable slots are safe for
+// concurrent Get/Set through vars.Var, but namespace metadata may be mutated
+// during a default-global Eval transaction. Callers that need a metadata-
+// consistent snapshot should use GlobalSnapshot; callers that need serialized
+// mutation/transaction semantics should use Eval/ExtendGlobal/
+// DeleteFromGlobal/CallInDefaultGlobal.
 func (ev *Evaler) Global() *Ns {
 	ev.mu.RLock()
 	defer ev.mu.RUnlock()
 	return ev.global
 }
 
+// GlobalSnapshot returns a metadata-consistent snapshot of the default global
+// namespace. It clones namespace metadata under globalEvalMu while preserving
+// shared variable slot objects, so reads observe a stable visibility view and
+// variable Get/Set still operate on liveVars. Callers that only need to look
+// up a single name should use GlobalVar instead, which does not clone.
+func (ev *Evaler) GlobalSnapshot() *Ns {
+	ev.lockGlobalEval()
+	defer ev.unlockGlobalEval()
+	return ev.global.clone()
+}
+
+// GlobalVar returns the variable with the given name in the default global
+// namespace, or nil if no such variable exists. It is safe to call
+// concurrently with default-global Eval; like GlobalSnapshot it serializes on
+// the global evaluation transaction, but without cloning the namespace, making
+// it suitable for point lookups on hot paths such as per-keystroke syntax
+// highlighting.
+func (ev *Evaler) GlobalVar(name string) vars.Var {
+	ev.lockGlobalEval()
+	defer ev.unlockGlobalEval()
+	return ev.global.IndexString(name)
+}
+
 // ExtendGlobal extends the global namespace with the given namespace.
 func (ev *Evaler) ExtendGlobal(ns Nser) {
+	ev.lockGlobalEval()
+	defer ev.unlockGlobalEval()
 	ev.mu.Lock()
 	defer ev.mu.Unlock()
 	ev.global = CombineNs(ev.global, ns.Ns())
@@ -172,6 +335,8 @@ func (ev *Evaler) ExtendGlobal(ns Nser) {
 
 // DeleteFromGlobal deletes names from the global namespace.
 func (ev *Evaler) DeleteFromGlobal(names map[string]struct{}) {
+	ev.lockGlobalEval()
+	defer ev.unlockGlobalEval()
 	ev.mu.Lock()
 	defer ev.mu.Unlock()
 	g := ev.global.clone()
@@ -287,6 +452,13 @@ type EvalCfg struct {
 	// after the code is executed.
 	PutInFg bool
 	// If not nil, used the given global namespace, instead of Evaler's own.
+	//
+	// Value updates to variables that already exist in this namespace are
+	// visible to the caller (variable objects are shared), but declarations
+	// made by the evaluated code are not persisted into it; module loading
+	// uses the namespace returned by Frame.PrepareEval instead. Callers that
+	// need declarations to persist should use the Evaler's default global
+	// namespace.
 	Global *Ns
 }
 
@@ -307,6 +479,12 @@ func (cfg *EvalCfg) fillDefaults() {
 
 // Eval evaluates a piece of source code with the given configuration. The
 // returned error may be a parse error, compilation error or exception.
+//
+// Evaluations using the Evaler's default global namespace are serialized to
+// protect shared namespace runtime metadata. Evaluations with a custom
+// cfg.Global bypass this serialization; callers must synchronize concurrent
+// use of a shared *Ns. Tombstones of rolled-back declarations are swept
+// before compiling, so repeated failures don't grow the namespace.
 func (ev *Evaler) Eval(src parse.Source, cfg EvalCfg) error {
 	cfg.fillDefaults()
 	errFile := cfg.Ports[2].File
@@ -316,24 +494,25 @@ func (ev *Evaler) Eval(src parse.Source, cfg EvalCfg) error {
 		return err
 	}
 
-	ev.mu.Lock()
-	b := ev.builtin
 	defaultGlobal := cfg.Global == nil
 	if defaultGlobal {
-		// If cfg.Global is nil, use the Evaler's default global, and also
-		// mutate the default global.
-		cfg.Global = ev.global
-		// Continue to hold the mutex; it will be released when ev.global gets
-		// mutated.
-	} else {
-		ev.mu.Unlock()
+		ev.lockGlobalEval()
+		defer ev.unlockGlobalEval()
+		ev.noteGlobalEvalOwner()
 	}
+	ev.mu.RLock()
+	b := ev.builtin
+	if defaultGlobal {
+		// Sweep tombstones left by rolled-back declarations of earlier
+		// chunks, so that they don't accumulate. The swept namespace is
+		// observably equivalent and becomes the base of this compilation.
+		cfg.Global = ev.global.withoutTombstones()
+	}
+	g := cfg.Global
+	ev.mu.RUnlock()
 
-	op, _, err := compile(b.static(), cfg.Global.static(), nil, tree, errFile)
+	op, _, err := compile(b.static(), g.static(), nil, tree, errFile)
 	if err != nil {
-		if defaultGlobal {
-			ev.mu.Unlock()
-		}
 		return err
 	}
 
@@ -342,10 +521,10 @@ func (ev *Evaler) Eval(src parse.Source, cfg EvalCfg) error {
 
 	newLocal, exec := op.prepare(fm)
 	if defaultGlobal {
+		ev.mu.Lock()
 		ev.global = newLocal
 		ev.mu.Unlock()
 	}
-
 	return exec()
 }
 
@@ -369,12 +548,44 @@ func (cfg *CallCfg) fillDefaults() {
 }
 
 // Call calls a given function.
+//
+// When evalCfg.Global is nil, Call snapshots the Evaler's default global
+// namespace under globalEvalMu, then executes the callback without holding the
+// lock. The snapshot avoids races with concurrent default-global transaction
+// metadata mutation while preserving shared variable slot objects. Keeping
+// callback execution outside globalEvalMu preserves compatibility with
+// UI/editor callbacks that may block or reenter eval-sensitive paths.
+//
+// Safety: default-global Call is not serialized with concurrent Eval/
+// ExtendGlobal/DeleteFromGlobal. Use it for normal/editor callbacks that can
+// tolerate seeing committed global state before/after concurrent transactions.
+// Use CallInDefaultGlobal when callback execution must be serialized with those
+// transactions, and only when the callback cannot block on work that needs
+// globalEvalMu.
 func (ev *Evaler) Call(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
 	callCfg.fillDefaults()
 	evalCfg.fillDefaults()
 	if evalCfg.Global == nil {
-		evalCfg.Global = ev.Global()
+		evalCfg.Global = ev.GlobalSnapshot()
 	}
+	fm, cleanup := ev.prepareFrame(parse.Source{Name: callCfg.From}, evalCfg)
+	defer cleanup()
+	return f.Call(fm, callCfg.Args, callCfg.Opts)
+}
+
+// CallInDefaultGlobal calls a function with the Evaler's default global
+// namespace serialized with default-global Eval/ExtendGlobal/DeleteFromGlobal.
+// Use it for concurrent or background callers that must not race with global
+// namespace transactions. Do not use it from callbacks that may already be
+// executing while holding or depending on prompt/editor paths that cannot block
+// on global eval progress.
+func (ev *Evaler) CallInDefaultGlobal(f Callable, callCfg CallCfg, evalCfg EvalCfg) error {
+	callCfg.fillDefaults()
+	evalCfg.fillDefaults()
+	ev.lockGlobalEval()
+	defer ev.unlockGlobalEval()
+	ev.noteGlobalEvalOwner()
+	evalCfg.Global = ev.global
 	fm, cleanup := ev.prepareFrame(parse.Source{Name: callCfg.From}, evalCfg)
 	defer cleanup()
 	return f.Call(fm, callCfg.Args, callCfg.Opts)
@@ -388,7 +599,7 @@ func (ev *Evaler) prepareFrame(src parse.Source, cfg EvalCfg) (*Frame, func()) {
 
 	ports := fillDefaultDummyPorts(cfg.Ports)
 
-	fm := &Frame{ev, src, cfg.Global, new(Ns), nil, nil, intCtx, ports, nil, false, false}
+	fm := &Frame{ev, src, cfg.Global, new(Ns), nil, nil, intCtx, ports, nil, false, false, 0, nil}
 	return fm, func() {
 		if cfg.PutInFg {
 			err := putSelfInFg()
@@ -425,10 +636,15 @@ func (ev *Evaler) Check(src parse.Source, w io.Writer) (error, []string, error) 
 
 // CheckTree checks the given parsed source tree for autofixes and compilation
 // errors. If w is not nil, deprecation messages are written to it.
+//
+// The default global namespace is read through GlobalSnapshot so that the
+// compile-time view is metadata-consistent with concurrent default-global
+// Eval transactions.
 func (ev *Evaler) CheckTree(tree parse.Tree, w io.Writer) ([]string, error) {
 	ev.mu.RLock()
-	b, g, m := ev.builtin, ev.global, ev.modules
+	b, m := ev.builtin, ev.modules
 	ev.mu.RUnlock()
+	g := ev.GlobalSnapshot()
 	_, autofixes, compileErr := compile(b.static(), g.static(), mapKeys(m), tree, w)
 	return autofixes, compileErr
 }

@@ -40,8 +40,27 @@ type staticVarInfo struct {
 	readOnly bool
 	// Deleted variables can still be kept in the Ns since there might be a
 	// reference to them in a closure. Shadowed variables are also considered
-	// deleted.
+	// deleted. A chunk publishes the compile-time shadow deletions of its
+	// template; rollback reverts the deletions projected by forms that never
+	// executed. An executed del marks the entry hidden as well, so that
+	// rollback can tell it apart from such a projection.
 	deleted bool
+	// Hidden variables exist in the namespace slot layout but are not visible
+	// to Elvish name lookup. Declarations start hidden in function scopes and
+	// become visible when their declaration op executes. Rollback of a failed
+	// chunk hides entries that lost to an executed op or never executed; such
+	// entries are also deleted, making them tombstones that the next
+	// compilation sweeps away (see Ns.withoutTombstones).
+	hidden bool
+	// Activated means the declaration, assignment, or deletion for this slot has
+	// executed in the current chunk evaluation. Rollback preserves activated
+	// slots and restores pre-existing hidden/deleted metadata for the rest.
+	activated bool
+	// Captured marks a declaration compiled inside an exception-capture chunk
+	// (?(...)). When the capture fails, such declarations are tombstoned by
+	// the capture's rollback; declarations of enclosing forms are left for
+	// their own ops.
+	captured bool
 }
 
 // CombineNs returns an *Ns that contains all the bindings from both ns1 and
@@ -125,7 +144,7 @@ func (ns *Ns) IndexString(k string) vars.Var {
 
 func (ns *Ns) lookup(k string) (staticVarInfo, int) {
 	for i, info := range ns.infos {
-		if info.name == k && !info.deleted {
+		if info.name == k && !info.deleted && !info.hidden {
 			return info, i
 		}
 	}
@@ -135,7 +154,7 @@ func (ns *Ns) lookup(k string) (staticVarInfo, int) {
 // IterateKeys produces the names of all the variables in this Ns.
 func (ns *Ns) IterateKeys(f func(any) bool) {
 	for _, info := range ns.infos {
-		if info.deleted {
+		if info.deleted || info.hidden {
 			continue
 		}
 		if !f(info.name) {
@@ -149,7 +168,7 @@ func (ns *Ns) IterateKeys(f func(any) bool) {
 // code. It doesn't support breaking early.
 func (ns *Ns) IterateKeysString(f func(string)) {
 	for _, info := range ns.infos {
-		if !info.deleted {
+		if !info.deleted && !info.hidden {
 			f(info.name)
 		}
 	}
@@ -158,7 +177,7 @@ func (ns *Ns) IterateKeysString(f func(string)) {
 // HasKeyString reports whether the Ns has a variable with the given name.
 func (ns *Ns) HasKeyString(k string) bool {
 	for _, info := range ns.infos {
-		if info.name == k && !info.deleted {
+		if info.name == k && !info.deleted && !info.hidden {
 			return true
 		}
 	}
@@ -167,6 +186,37 @@ func (ns *Ns) HasKeyString(k string) bool {
 
 func (ns *Ns) static() *staticNs {
 	return &staticNs{ns.infos}
+}
+
+// withoutTombstones returns a namespace without tombstones left by rolled-back
+// declarations: entries that are hidden, deleted and never activated. Such
+// entries were never visible to running code, so no closure can reference
+// them; live closures hold variable objects directly, not namespace entries.
+// If there is nothing to sweep, ns itself is returned.
+func (ns *Ns) withoutTombstones() *Ns {
+	sweepable := false
+	for _, info := range ns.infos {
+		if info.hidden && info.deleted && !info.activated {
+			sweepable = true
+			break
+		}
+	}
+	if !sweepable {
+		return ns
+	}
+	kept := 0
+	swept := &Ns{make([]vars.Var, len(ns.infos)), make([]staticVarInfo, len(ns.infos))}
+	for i, info := range ns.infos {
+		if info.hidden && info.deleted && !info.activated {
+			continue
+		}
+		swept.slots[kept] = ns.slots[i]
+		swept.infos[kept] = info
+		kept++
+	}
+	swept.slots = swept.slots[:kept:kept]
+	swept.infos = swept.infos[:kept:kept]
+	return swept
 }
 
 // NsBuilder is a helper type used for building an Ns.
@@ -234,7 +284,7 @@ func (nb NsBuilder) Ns() *Ns {
 	i := 0
 	for name, variable := range nb.m {
 		ns.slots[i] = variable
-		ns.infos[i] = staticVarInfo{name, vars.IsReadOnly(variable), false}
+		ns.infos[i] = staticVarInfo{name, vars.IsReadOnly(variable), false, false, true, false}
 		i++
 	}
 	return ns
@@ -256,15 +306,25 @@ func (ns *staticNs) clone() *staticNs {
 func (ns *staticNs) del(k string) {
 	if _, i := ns.lookup(k); i != -1 {
 		ns.infos[i].deleted = true
+		ns.infos[i].hidden = false
 	}
 }
 
 // Adds a name, shadowing any existing one, and returns the index for the new
 // name.
 func (ns *staticNs) add(k string) int {
+	return ns.addWith(k, false, false)
+}
+
+func (ns *staticNs) addWith(k string, hidden, captured bool) int {
 	ns.del(k)
-	ns.infos = append(ns.infos, staticVarInfo{k, false, false})
+	ns.infos = append(ns.infos, staticVarInfo{k, false, false, hidden, !hidden, captured})
 	return len(ns.infos) - 1
+}
+
+func (ns *staticNs) hasVisible(k string) bool {
+	_, i := ns.lookup(k)
+	return i != -1
 }
 
 func (ns *staticNs) lookup(k string) (staticVarInfo, int) {

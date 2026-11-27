@@ -100,7 +100,7 @@ func (ev *Evaler) builtinNames() []string {
 // global scope, without the ~ suffix.
 func (ev *Evaler) functionNames() []string {
 	var fns []string
-	ev.Global().IterateKeysString(func(name string) {
+	ev.GlobalSnapshot().IterateKeysString(func(name string) {
 		if strings.HasSuffix(name, FnSuffix) {
 			fns = append(fns, strings.TrimSuffix(name, FnSuffix))
 		}
@@ -121,7 +121,7 @@ func (ev *Evaler) variableNames() []string {
 			names = append(names, trimmed)
 		}
 	}
-	ev.Global().IterateKeysString(add)
+	ev.GlobalSnapshot().IterateKeysString(add)
 	ev.Builtin().IterateKeysString(add)
 	return names
 }

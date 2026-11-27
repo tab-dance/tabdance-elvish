@@ -92,9 +92,28 @@ func compileVar(cp *compiler, fn *parse.Form) effectOp {
 	lhs, rhs := compileLHSOptionalRHS(cp, fn.Args, fn.To, newLValue)
 	if rhs == nil {
 		// Just create new variables, nothing extra to do at runtime.
-		return nopOp{}
+		return unhideLValuesOp{lhs}
 	}
 	return &assignOp{fn.Range(), lhs, rhs, false}
+}
+
+type unhideLValuesOp struct{ lhs lvaluesGroup }
+
+func (op unhideLValuesOp) exec(fm *Frame) Exception {
+	for _, lv := range op.lhs.lvalues {
+		unhideLocalRef(fm, lv.ref)
+	}
+	return nil
+}
+
+// Marks the variable referenced by a new-declaration lvalue as declared: its
+// entry becomes visible to name-based lookups, and rollback of a failed chunk
+// preserves it. Has no effect on entries that are not fresh local declarations.
+func unhideLocalRef(fm *Frame, ref *varRef) {
+	if ref.scope == localScope && len(ref.subNames) == 0 {
+		fm.local.infos[ref.index].hidden = false
+		fm.local.infos[ref.index].activated = true
+	}
 }
 
 // SetForm = 'set' { LHS } '=' { Compound }
@@ -268,6 +287,12 @@ type delLocalVarOp struct{ index int }
 
 func (op delLocalVarOp) exec(fm *Frame) Exception {
 	fm.local.slots[op.index] = nil
+	fm.local.infos[op.index].deleted = true
+	// hidden distinguishes an executed del from compile-time shadow-deletion
+	// metadata (which leaves hidden false) so that rollback can tell them
+	// apart.
+	fm.local.infos[op.index].hidden = true
+	fm.local.infos[op.index].activated = true
 	return nil
 }
 
@@ -356,7 +381,10 @@ func compileFn(cp *compiler, fn *parse.Form) effectOp {
 
 	// Define the variable before compiling the body, so that the body may refer
 	// to the function itself.
-	index := cp.thisScope().add(name + FnSuffix)
+	scope := cp.thisScope()
+	varName := name + FnSuffix
+	hidden := !scope.hasVisible(varName)
+	index := scope.addWith(varName, hidden, cp.inCapture)
 	op := cp.lambda(bodyNode)
 
 	return fnOp{fn.Args[0].Range(), index, op}
@@ -373,6 +401,8 @@ func (op fnOp) exec(fm *Frame) Exception {
 	// allows the definition of recursive functions; the actual function will
 	// never be called.
 	fm.local.slots[op.varIndex].Set(NewGoFn("<shouldn't be called>", nop))
+	fm.local.infos[op.varIndex].hidden = false
+	fm.local.infos[op.varIndex].activated = true
 	values, exc := op.lambdaOp.exec(fm)
 	if exc != nil {
 		return exc
@@ -409,7 +439,10 @@ func compileUse(cp *compiler, fn *parse.Form) effectOp {
 		return nil
 	}
 
-	return useOp{fn.Range(), cp.thisScope().add(name + NsSuffix), spec}
+	scope := cp.thisScope()
+	varName := name + NsSuffix
+	hidden := !scope.hasVisible(varName)
+	return useOp{fn.Range(), scope.addWith(varName, hidden, cp.inCapture), spec}
 }
 
 type useOp struct {
@@ -424,6 +457,8 @@ func (op useOp) exec(fm *Frame) Exception {
 		return fm.errorp(op, err)
 	}
 	fm.local.slots[op.varIndex].Set(ns)
+	fm.local.infos[op.varIndex].hidden = false
+	fm.local.infos[op.varIndex].activated = true
 	return nil
 }
 
@@ -851,6 +886,7 @@ func (op *forOp) exec(fm *Frame) Exception {
 	if lvalErr != nil {
 		return fm.errorp(op.lvalue, lvalErr)
 	}
+	unhideLocalRef(loopFm, op.lvalue.ref)
 
 	iterated := false
 	var errElement error
@@ -957,6 +993,7 @@ func (op *tryOp) exec(fm *Frame) Exception {
 		if err != nil {
 			return fm.errorp(op, err)
 		}
+		unhideLocalRef(fm, op.catchVar.ref)
 	}
 	catch := execLambdaOp(fm, op.catchOp)
 	elseFn := execLambdaOp(fm, op.elseOp)

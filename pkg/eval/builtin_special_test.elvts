@@ -133,6 +133,105 @@ Compilation error: new variable $a must not have indices
 Compilation error: lvalue may not be composite expressions
   [tty]:1:5-8: var a'b'
 
+## declaration after exception is not installed (https://b.elv.sh/1445) ##
+~> var x = before
+~> try { fail error; var y = after } catch e { nop }
+   put $x
+▶ before
+~> put $y
+Compilation error: variable $y not found
+  [tty]:1:5-6: put $y
+~> try { fail error; var z = after } catch e { nop }
+~> put $z
+Compilation error: variable $z not found
+  [tty]:1:5-6: put $z
+~> var kept = ok
+~> fail error; del kept
+Exception: error
+  [tty]:1:1-10: fail error; del kept
+~> put $kept
+▶ ok
+~> var redecl = before
+~> fail error; var redecl = after
+Exception: error
+  [tty]:1:1-10: fail error; var redecl = after
+~> put $redecl
+▶ before
+~> try { var rhs-fail = (fail error) } catch e { nop }
+~> put $rhs-fail
+Compilation error: variable $rhs-fail not found
+  [tty]:1:5-13: put $rhs-fail
+~> try { fail error; var noval } catch e { nop }
+~> put $noval
+Compilation error: variable $noval not found
+  [tty]:1:5-10: put $noval
+~> var a = 1
+~> try { var b = (fail error) } catch e { nop }
+   put $a
+▶ 1
+~> put $b
+Compilation error: variable $b not found
+  [tty]:1:5-6: put $b
+~> var pre-del = ok
+~> del pre-del; fail error; var post-del = bad
+Exception: error
+  [tty]:1:14-23: del pre-del; fail error; var post-del = bad
+~> put $pre-del
+Compilation error: variable $pre-del not found
+  [tty]:1:5-12: put $pre-del
+
+## declaration after a failed chunk is not installed in later chunks ##
+~> var pre = ok
+~> fail error; var z = after
+Exception: error
+  [tty]:1:1-10: fail error; var z = after
+~> put $z
+Compilation error: variable $z not found
+  [tty]:1:5-6: put $z
+~> var z = redecl
+~> put $z
+▶ redecl
+~> var r = 1
+~> fail e; var r = 2
+Exception: e
+  [tty]:1:1-6: fail e; var r = 2
+~> fail e; var r = 3
+Exception: e
+  [tty]:1:1-6: fail e; var r = 3
+~> var r = 4
+~> put $r
+▶ 4
+
+## executed declarations survive a later failure ##
+~> var x = 1
+~> var x = 9; fail e; var x = 2
+Exception: e
+  [tty]:1:12-17: var x = 9; fail e; var x = 2
+~> put $x
+▶ 9
+~> var x = 9; var x = 8; fail e; var x = 7
+Exception: e
+  [tty]:1:23-28: var x = 9; var x = 8; fail e; var x = 7
+~> put $x
+▶ 8
+~> set x = 5; fail e; var x = 2
+Exception: e
+  [tty]:1:12-17: set x = 5; fail e; var x = 2
+~> put $x
+▶ 5
+~> del x; fail e; var x = 2
+Exception: e
+  [tty]:1:8-13: del x; fail e; var x = 2
+~> put $x
+Compilation error: variable $x not found
+  [tty]:1:5-6: put $x
+~> var a b = 1
+Exception: arity mismatch: assignment right-hand-side must be 2 values, but is 1 value
+  [tty]:1:1-11: var a b = 1
+~> put $a
+Compilation error: variable $a not found
+  [tty]:1:5-6: put $a
+
 ///////
 # set #
 ///////
@@ -892,6 +991,57 @@ Compilation error: function name must not be empty
 Compilation error: function name must be unqualified
   [tty]:1:4-8: fn 'a:b' {|| }
 
+## declaration after exception is not installed (https://b.elv.sh/1445) ##
+~> try { fail error; fn f { echo foo } } catch e { nop }
+   put $f~
+Compilation error: variable $f~ not found
+  [tty]:2:5-7: put $f~
+~> fn g { put before }
+~> fail error; fn g { put after }
+Exception: error
+  [tty]:1:1-10: fail error; fn g { put after }
+~> g
+▶ before
+~> fn with-tmp {
+     var x = orig
+     try { tmp x = changed; fail error; var y = bad } catch e { nop }
+     put $x
+   }
+   with-tmp
+▶ orig
+
+## declaration after a failed chunk is not installed in later chunks ##
+~> fail error; fn h { echo foo }
+Exception: error
+  [tty]:1:1-10: fail error; fn h { echo foo }
+~> put $h~
+Compilation error: variable $h~ not found
+  [tty]:1:5-7: put $h~
+~> fn h2 { put ok }
+~> fail e; fn h2 { put bad }
+Exception: e
+  [tty]:1:1-6: fail e; fn h2 { put bad }
+~> h2
+▶ ok
+
+## declaration after a failed chunk is not installed: falls back to external (unix) ##
+//only-on unix
+~> fail error; fn h { echo foo }
+Exception: error
+  [tty]:1:1-10: fail error; fn h { echo foo }
+~> h
+Exception: exec: "h": executable file not found in $PATH
+  [tty]:1:1-1: h
+
+## declaration after a failed chunk is not installed: falls back to external (windows) ##
+//only-on windows
+~> fail error; fn h { echo foo }
+Exception: error
+  [tty]:1:1-10: fail error; fn h { echo foo }
+~> h
+Exception: exec: "h": executable file not found in %PATH%
+  [tty]:1:1-1: h
+
 ///////
 # use #
 ///////
@@ -1045,6 +1195,43 @@ Exception: no such module: ./unknown
 ~> use ../unknown
 Exception: no such module: ../unknown
   [tty]:1:1-14: use ../unknown
+
+## declaration after exception is not installed (https://b.elv.sh/1445) ##
+//tmp-lib-dir
+~> echo 'var name = ipsum' > $lib/lorem.elv
+~> try { fail error; use lorem } catch e { nop }
+   put $lorem:name
+Compilation error: variable $lorem:name not found
+  [tty]:2:5-15: put $lorem:name
+~> echo 'var name = before' > $lib/mod.elv
+~> use mod
+~> echo 'var name = after' > $lib/mod.elv
+~> fail error; use mod
+Exception: error
+  [tty]:1:1-10: fail error; use mod
+~> put $mod:name
+▶ before
+~> echo 'var before = ok; fail boom; var after = bad' > $lib/badmod.elv
+~> try { use badmod } catch e { nop }
+~> put $badmod:before
+Compilation error: variable $badmod:before not found
+  [tty]:1:5-18: put $badmod:before
+~> put $badmod:after
+Compilation error: variable $badmod:after not found
+  [tty]:1:5-17: put $badmod:after
+
+## import after a failed chunk is not installed in later chunks ##
+//tmp-lib-dir
+~> echo 'var name = ipsum' > $lib/lorem.elv
+~> fail error; use lorem
+Exception: error
+  [tty]:1:1-10: fail error; use lorem
+~> put $lorem:name
+Compilation error: variable $lorem:name not found
+  [tty]:1:5-15: put $lorem:name
+~> use lorem
+~> put $lorem:name
+▶ ipsum
 
 ## wrong number of arguments ##
 ~> use
