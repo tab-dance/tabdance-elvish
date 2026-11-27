@@ -207,11 +207,16 @@ This fork adds on top of upstream Elvish:
     entries when they run (`unhideLocalRef`, `fnOp`, `useOp`, `delLocalVarOp`);
     on failure `rollbackAfterChunkException` (`pkg/eval/compiler.go`) resolves
     per-name winners and tombstones never-executed entries, which
-    `Ns.withoutTombstones` sweeps before the next compilation. Failed `?(...)`
-    captures tombstone only their own declarations so enclosing compiled indices
-    stay valid. Forms dispatched to pipeline goroutines get a private metadata
-    copy of the namespace (`pipelineOp.exec` in `pkg/eval/compile_effect.go`) so
-    background ops cannot race the rollback. Tests: `pkg/eval/rollback_test.go`,
+    `Ns.withoutTombstones` sweeps before the next compilation; the sweep is
+    gated on `Ns.hasTombstones` so clean namespaces skip the O(n) scan. Failed
+    `?(...)` captures tombstone only their own declarations so enclosing
+    compiled indices stay valid. Chunks that declare, redeclare or import
+    nothing at the chunk level (`staticNs.mutated`) share the namespace instead
+    of copying it and skip the rollback entirely - they cannot have pending
+    declarations, and their `set`/`del` effects publish directly. Forms
+    dispatched to pipeline goroutines get a private metadata copy of the
+    namespace (`pipelineOp.exec` in `pkg/eval/compile_effect.go`) so background
+    ops cannot race the rollback. Tests: `pkg/eval/rollback_test.go`,
     transcripts in `pkg/eval/builtin_special_test.elvts`.
 
 -   **Default-global concurrency contract**: default-global `Eval`,

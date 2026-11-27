@@ -116,3 +116,66 @@ func TestCaptureInFunctionLeavesArgsClean(t *testing.T) {
 		}
 	}
 }
+
+// A chunk that doesn't change the namespace layout takes the no-copy fast
+// path: it shares the namespace instead of copying it, and a failure keeps
+// the effects that executed before it, like the rollback would.
+func TestReadOnlyChunkSharesNamespaceAndKeepsEffects(t *testing.T) {
+	ev := NewEvaler()
+	mustEval(t, ev, "var a = one; var b = two")
+	shared := ev.global
+	evalExpectError(t, ev, "set a = five; del b; fail x")
+	if ev.global != shared {
+		t.Errorf("read-only chunk copied the namespace")
+	}
+	if v := ev.GlobalVar("a"); v == nil || v.Get() != "five" {
+		t.Errorf("executed set before failure not kept: got %v, want five", v)
+	}
+	if v := ev.GlobalVar("b"); v != nil {
+		t.Errorf("executed del before failure not kept: b still visible")
+	}
+	// A declaring chunk still copies for rollback bookkeeping.
+	mustEval(t, ev, "var c = 3")
+	if ev.global == shared {
+		t.Errorf("declaring chunk shared the namespace instead of copying")
+	}
+}
+
+// A failed exception capture inside a read-only chunk must not disturb
+// existing bindings: with no capture-internal declarations and the rollback
+// boundary above every entry, its rollback is inert.
+func TestReadOnlyChunkCaptureFailureIsInert(t *testing.T) {
+	ev := NewEvaler()
+	mustEval(t, ev, "var a = one; var r = $nil")
+	shared := ev.global
+	mustEval(t, ev, "set r = ?(fail x)")
+	if ev.global != shared {
+		t.Errorf("read-only chunk with capture copied the namespace")
+	}
+	if v := ev.GlobalVar("a"); v == nil || v.Get() != "one" {
+		t.Errorf("existing binding disturbed by failed capture: got %v, want one", v)
+	}
+	if v := ev.GlobalVar("r"); v == nil {
+		t.Errorf("r missing after failed capture")
+	}
+}
+
+// Entries deleted by an executed del become sweepable once a later declaring
+// chunk resets their activation; the tombstone flag set by that reset must
+// make the next compilation sweep them away.
+func TestDeletedEntriesAreSweptAfterNextDeclaringChunk(t *testing.T) {
+	ev := NewEvaler()
+	mustEval(t, ev, "var x = 1")
+	mustEval(t, ev, "del x")
+	mustEval(t, ev, "var y = 2")
+	mustEval(t, ev, "put ok")
+	for _, info := range ev.global.infos {
+		if info.name == "x" {
+			t.Errorf("deleted entry x not swept: hidden=%v deleted=%v activated=%v",
+				info.hidden, info.deleted, info.activated)
+		}
+	}
+	if ev.global.hasTombstones {
+		t.Errorf("tombstone flag not cleared by sweep")
+	}
+}

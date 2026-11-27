@@ -53,7 +53,7 @@ func compile(b, g *staticNs, modules []string, tree parse.Tree, w io.Writer) (ns
 		modules,
 		w, newDeprecationRegistry(), tree.Source, false, nil, nil}
 	chunkOp := cp.chunkOp(tree.Root)
-	return nsOp{chunkOp, g}, cp.autofixes, diag.PackErrors(cp.errors)
+	return nsOp{chunkOp, g, g.mutated}, cp.autofixes, diag.PackErrors(cp.errors)
 }
 
 // rollbackAfterChunkException restores the namespace state after an exception:
@@ -80,6 +80,10 @@ func compile(b, g *staticNs, modules []string, tree parse.Tree, w io.Writer) (ns
 // (marked captured at compile time) are tombstoned, while pending declarations
 // of enclosing forms are left for their own ops.
 func rollbackAfterChunkException(fm *Frame, capture bool) {
+	// The rollback may create tombstones (via markEntryGone, or by flipping
+	// losers to hidden+deleted); flag them for the pre-compile sweep. Setting
+	// this conservatively is fine: a false positive costs one O(n) scan.
+	fm.local.hasTombstones = true
 	boundary := fm.rollbackBoundary
 	infos := fm.local.infos
 	for i := 0; i < boundary && i < len(fm.rollbackOrig); i++ {
@@ -150,18 +154,36 @@ func markEntryGone(infos []staticVarInfo, i int, capture bool) {
 type nsOp struct {
 	inner    effectOp
 	template *staticNs
+	// layoutMutated records whether the compiled chunk declares, redeclares
+	// or imports anything at the chunk level. Chunks that don't can neither
+	// create pending declarations nor shadow existing ones, so preparing them
+	// needs no rollback bookkeeping.
+	layoutMutated bool
 }
 
 // Prepares the local namespace, and returns the namespace and a function for
 // executing the inner effectOp. Mutates fm.local.
 func (op nsOp) prepare(fm *Frame) (*Ns, func() Exception) {
+	if !op.layoutMutated {
+		// The chunk cannot change the namespace layout: it has no pending
+		// declarations to roll back and no shadowed entries to restore, so
+		// the existing namespace is shared as-is and execution skips the
+		// rollback. Runtime effects on existing variables - set and del -
+		// publish directly, which is what the rollback would keep anyway.
+		// The rollback boundary sits above every entry, so a failed capture
+		// inside such a chunk can only re-resolve entries to their current
+		// state and tombstones nothing.
+		fm.rollbackBoundary = len(fm.local.infos)
+		fm.rollbackOrig = nil
+		return fm.local, func() Exception { return op.inner.exec(fm) }
+	}
 	origInfos := append([]staticVarInfo(nil), fm.local.infos...)
 
 	n := len(op.template.infos)
 	if n < len(origInfos) {
 		n = len(origInfos)
 	}
-	newLocal := &Ns{make([]vars.Var, n), make([]staticVarInfo, n)}
+	newLocal := &Ns{slots: make([]vars.Var, n), infos: make([]staticVarInfo, n)}
 	copy(newLocal.slots, fm.local.slots)
 	copy(newLocal.infos, origInfos)
 	if len(op.template.infos) >= len(origInfos) {
@@ -170,6 +192,13 @@ func (op nsOp) prepare(fm *Frame) (*Ns, func() Exception) {
 	for i := 0; i < len(origInfos) && i < len(newLocal.infos); i++ {
 		// Activation tracks execution in this chunk evaluation for rollback.
 		// Pre-existing slots start unactivated; executed ops set it.
+		//
+		// Resetting activation can turn an executed del (hidden, deleted,
+		// activated) into a sweepable tombstone, so keep the tombstone flag
+		// accurate for the pre-compile sweep.
+		if newLocal.infos[i].hidden && newLocal.infos[i].deleted {
+			newLocal.hasTombstones = true
+		}
 		newLocal.infos[i].activated = false
 	}
 	for i := len(origInfos); i < len(op.template.infos); i++ {

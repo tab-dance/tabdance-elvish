@@ -27,6 +27,11 @@ type Ns struct {
 	// because most namespaces are small enough for linear lookup to be faster
 	// than map access.
 	infos []staticVarInfo
+	// hasTombstones is true when infos may contain tombstones of rolled-back
+	// declarations (hidden, deleted, never activated) that the pre-compile
+	// sweep (withoutTombstones) should remove. It lets the sweep skip its
+	// O(n) scan in the common case; a false positive only costs one scan.
+	hasTombstones bool
 }
 
 // Nser is anything that can be converted to an *Ns.
@@ -85,8 +90,9 @@ func CombineNs(ns1, ns2 *Ns) *Ns {
 
 func (ns *Ns) clone() *Ns {
 	return &Ns{
-		append([]vars.Var(nil), ns.slots...),
-		append([]staticVarInfo(nil), ns.infos...)}
+		slots:         append([]vars.Var(nil), ns.slots...),
+		infos:         append([]staticVarInfo(nil), ns.infos...),
+		hasTombstones: ns.hasTombstones}
 }
 
 // Ns returns ns itself.
@@ -185,15 +191,19 @@ func (ns *Ns) HasKeyString(k string) bool {
 }
 
 func (ns *Ns) static() *staticNs {
-	return &staticNs{ns.infos}
+	return &staticNs{infos: ns.infos}
 }
 
 // withoutTombstones returns a namespace without tombstones left by rolled-back
 // declarations: entries that are hidden, deleted and never activated. Such
 // entries were never visible to running code, so no closure can reference
 // them; live closures hold variable objects directly, not namespace entries.
-// If there is nothing to sweep, ns itself is returned.
+// If there is nothing to sweep, ns itself is returned (and its tombstone flag
+// is cleared, so the next call skips the scan).
 func (ns *Ns) withoutTombstones() *Ns {
+	if !ns.hasTombstones {
+		return ns
+	}
 	sweepable := false
 	for _, info := range ns.infos {
 		if info.hidden && info.deleted && !info.activated {
@@ -202,10 +212,11 @@ func (ns *Ns) withoutTombstones() *Ns {
 		}
 	}
 	if !sweepable {
+		ns.hasTombstones = false
 		return ns
 	}
 	kept := 0
-	swept := &Ns{make([]vars.Var, len(ns.infos)), make([]staticVarInfo, len(ns.infos))}
+	swept := &Ns{slots: make([]vars.Var, len(ns.infos)), infos: make([]staticVarInfo, len(ns.infos))}
 	for i, info := range ns.infos {
 		if info.hidden && info.deleted && !info.activated {
 			continue
@@ -280,7 +291,7 @@ func (nb NsBuilder) AddGoFns(fns map[string]any) NsBuilder {
 // Ns builds a namespace.
 func (nb NsBuilder) Ns() *Ns {
 	n := len(nb.m)
-	ns := &Ns{make([]vars.Var, n), make([]staticVarInfo, n)}
+	ns := &Ns{slots: make([]vars.Var, n), infos: make([]staticVarInfo, n)}
 	i := 0
 	for name, variable := range nb.m {
 		ns.slots[i] = variable
@@ -297,16 +308,22 @@ func (nb NsBuilder) Ns() *Ns {
 // staticNs is an empty namespace.
 type staticNs struct {
 	infos []staticVarInfo
+	// mutated records whether compilation has added or shadowed any entry in
+	// this scope. Chunk-level scopes start unmutated, and nsOp.prepare uses
+	// the flag to skip rollback bookkeeping for chunks that cannot change
+	// the namespace layout.
+	mutated bool
 }
 
 func (ns *staticNs) clone() *staticNs {
-	return &staticNs{append([]staticVarInfo(nil), ns.infos...)}
+	return &staticNs{infos: append([]staticVarInfo(nil), ns.infos...)}
 }
 
 func (ns *staticNs) del(k string) {
 	if _, i := ns.lookup(k); i != -1 {
 		ns.infos[i].deleted = true
 		ns.infos[i].hidden = false
+		ns.mutated = true
 	}
 }
 
@@ -318,6 +335,7 @@ func (ns *staticNs) add(k string) int {
 
 func (ns *staticNs) addWith(k string, hidden, captured bool) int {
 	ns.del(k)
+	ns.mutated = true
 	ns.infos = append(ns.infos, staticVarInfo{k, false, false, hidden, !hidden, captured})
 	return len(ns.infos) - 1
 }
